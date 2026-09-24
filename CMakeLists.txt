@@ -31,7 +31,7 @@ if(WIN32 AND TABENGINE_BUILD_WIN32_DEMO)
         message(FATAL_ERROR "Set TABENGINE_SKIA_ROOT to a Skia package with include/ and lib/skia.lib")
     endif()
     add_library(tabengine_skia STATIC src/core/shell.cpp src/skia/raster_renderer.cpp
-        src/skia/d3d12_renderer.cpp)
+        src/skia/d3d12_renderer.cpp src/skia/win32_text.cpp)
     target_include_directories(tabengine_skia PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_include_directories(tabengine_skia PRIVATE "${TABENGINE_SKIA_ROOT}")
     target_compile_definitions(tabengine_skia PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)

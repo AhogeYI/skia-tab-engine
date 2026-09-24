@@ -1,8 +1,8 @@
 #include "tabengine/shell.h"
+#include "tabengine/text.h"
 #include "tabengine/win32_platform.h"
 
 #include "include/core/SkCanvas.h"
-#include "include/core/SkFont.h"
 #include "include/core/SkPaint.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -25,18 +25,12 @@ public:
 
     void paint_body(tabengine::WindowId, tabengine::TabId active, SkCanvas& canvas,
                     tabengine::Rect body) override {
-        SkPaint paint;
-        paint.setAntiAlias(true);
-        paint.setColor(SkColorSetRGB(43, 52, 67));
-        SkFont font;
-        font.setSize(24);
         const std::string title = "Host content for tab " + std::to_string(active);
-        canvas.drawSimpleText(title.data(), title.size(), SkTextEncoding::kUTF8,
-                              32, static_cast<float>(body.y + 65), font, paint);
-        font.setSize(14);
+        tabengine::paint_ui_text(canvas, title, 32, static_cast<float>(body.y + 65),
+                                 24, SkColorSetRGB(43, 52, 67));
         const std::string hint = "Ctrl+T: new tab | drag a tab to reorder or tear off | close with x";
-        canvas.drawSimpleText(hint.data(), hint.size(), SkTextEncoding::kUTF8,
-                              32, static_cast<float>(body.y + 96), font, paint);
+        tabengine::paint_ui_text(canvas, hint, 32, static_cast<float>(body.y + 96),
+                                 14, SkColorSetRGB(43, 52, 67));
     }
 
     void body_event(const tabengine::Event&, tabengine::Rect) override {}

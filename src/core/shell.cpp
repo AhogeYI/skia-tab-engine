@@ -1,7 +1,7 @@
 #include "tabengine/shell.h"
+#include "tabengine/text.h"
 
 #include "include/core/SkCanvas.h"
-#include "include/core/SkFont.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkRect.h"
 
@@ -17,12 +17,7 @@ SkRect skrect(Rect r) {
 }
 
 void text(SkCanvas& canvas, const std::string& value, float x, float y, float size, SkColor color) {
-    SkPaint paint;
-    paint.setAntiAlias(true);
-    paint.setColor(color);
-    SkFont font;
-    font.setSize(size);
-    canvas.drawSimpleText(value.data(), value.size(), SkTextEncoding::kUTF8, x, y, font, paint);
+    paint_ui_text(canvas, value, x, y, size, color);
 }
 
 } // namespace

@@ -9,6 +9,7 @@ This repository is being developed independently. It does not implement an addre
 - Ordered tabs, active selection, metadata updates, and transfer between windows while preserving tab and content IDs.
 - Width adapting tab strip, selection, close and new tab controls, in strip reorder, and a Win32 native window move loop for tear off and attach.
 - Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a small demo application.
+- DirectWrite-backed Skia UI and caption typefaces so tab titles and controls render in the Windows build.
 - Headless core and shell tests, plus a hidden-HWND renderer smoke test. The core can be configured without Skia on other platforms.
 
 The Windows demo now presents Skia drawings through D3D12 when a suitable hardware adapter and swapchain are available. If initialization or presentation fails, it uses Skia raster pixels via `StretchDIBits`. Full drag animation, keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
