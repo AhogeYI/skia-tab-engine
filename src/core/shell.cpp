@@ -1,0 +1,383 @@
+#include "tabengine/shell.h"
+
+#include "include/core/SkCanvas.h"
+#include "include/core/SkFont.h"
+#include "include/core/SkPaint.h"
+#include "include/core/SkRect.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace tabengine {
+namespace {
+
+SkRect skrect(Rect r) {
+    return SkRect::MakeXYWH(static_cast<float>(r.x), static_cast<float>(r.y),
+                            static_cast<float>(r.width), static_cast<float>(r.height));
+}
+
+void text(SkCanvas& canvas, const std::string& value, float x, float y, float size, SkColor color) {
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    paint.setColor(color);
+    SkFont font;
+    font.setSize(size);
+    canvas.drawSimpleText(value.data(), value.size(), SkTextEncoding::kUTF8, x, y, font, paint);
+}
+
+} // namespace
+
+Shell::Shell(IPlatform& platform, IRenderer& renderer, IClient& client)
+    : platform_(platform), renderer_(renderer), client_(client) {
+    platform_.set_event_handler([this](const Event& event) { on_event(event); });
+    platform_.set_caption_hit_handler(
+        [this](WindowId window, Point client) { return caption_hit(window, client); });
+}
+
+Shell::~Shell() {
+    platform_.set_event_handler({});
+    platform_.set_caption_hit_handler({});
+    for (WindowId id : model_.window_ids()) {
+        renderer_.detach(id);
+        platform_.destroy(id);
+    }
+}
+
+WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
+    const WindowId id = model_.create_window();
+    if (!platform_.create(id, bounds, "Tabbed Window", false)) {
+        (void)model_.remove_window(id);
+        return 0;
+    }
+    if (!renderer_.attach(id, platform_.native_handle(id), platform_.client_size(id))) {
+        platform_.destroy(id);
+        (void)model_.remove_window(id);
+        return 0;
+    }
+    if (with_initial_tab) (void)new_tab(id);
+    if (visible) platform_.show(id);
+    platform_.invalidate(id);
+    return id;
+}
+
+TabId Shell::new_tab(WindowId window) {
+    if (!model_.window(window)) return 0;
+    NewTab created = client_.create_tab();
+    const TabId id = model_.add_tab(window, created.content, std::move(created.title));
+    if (id) {
+        (void)model_.select_tab(window, id);
+        platform_.invalidate(window);
+    }
+    return id;
+}
+
+bool Shell::close_tab(WindowId window, TabId tab) {
+    const WindowTabs* w = model_.window(window);
+    if (!w) return false;
+    const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+                                 [tab](const Tab& item) { return item.id == tab; });
+    if (it == w->tabs.end()) return false;
+    const ContentId content = it->content;
+    if (!model_.close_tab(window, tab)) return false;
+    client_.tab_closed(content);
+    if (const WindowTabs* remaining = model_.window(window)) {
+        if (remaining->tabs.empty()) close_window(window);
+        else platform_.invalidate(window);
+    }
+    return true;
+}
+
+bool Shell::select_tab(WindowId window, TabId tab) {
+    if (!model_.select_tab(window, tab)) return false;
+    platform_.invalidate(window);
+    return true;
+}
+
+bool Shell::update_tab(WindowId window, TabId tab, std::string title,
+                       bool loading, bool attention) {
+    if (!model_.update_tab(window, tab, std::move(title), loading, attention)) return false;
+    platform_.invalidate(window);
+    return true;
+}
+
+void Shell::close_window(WindowId window) {
+    const WindowTabs* w = model_.window(window);
+    if (!w) return;
+    std::vector<ContentId> content;
+    content.reserve(w->tabs.size());
+    for (const Tab& tab : w->tabs) content.push_back(tab.content);
+    if (drag_.window == window) drag_ = {};
+    request_destroy(window);
+    for (ContentId id : content) client_.tab_closed(id);
+}
+
+void Shell::request_destroy(WindowId window) {
+    if (!model_.remove_window(window)) return;
+    pending_destroy_.push_back(window);
+    if (dispatch_depth_ == 0) flush_destroy();
+}
+
+void Shell::flush_destroy() {
+    auto pending = std::move(pending_destroy_);
+    pending_destroy_.clear();
+    for (WindowId id : pending) {
+        renderer_.detach(id);
+        platform_.destroy(id);
+    }
+}
+
+void Shell::on_event(const Event& event) {
+    ++dispatch_depth_;
+    handle_event(event);
+    --dispatch_depth_;
+    if (dispatch_depth_ == 0) flush_destroy();
+}
+
+void Shell::handle_event(const Event& event) {
+    if (!model_.window(event.window)) return;
+    switch (event.type) {
+    case EventType::Paint: paint(event.window); break;
+    case EventType::Resized:
+        renderer_.resize(event.window, event.size);
+        platform_.invalidate(event.window);
+        break;
+    case EventType::PointerDown:
+    case EventType::PointerMove:
+    case EventType::PointerUp:
+    case EventType::CaptureLost:
+        handle_pointer(event);
+        break;
+    case EventType::Moving: handle_moving(event); break;
+    case EventType::NativeMoveEnded: finish_native_drag(); break;
+    case EventType::CloseRequested: close_window(event.window); break;
+    case EventType::KeyDown:
+        if (event.ctrl && (event.key == 'T' || event.key == 't')) (void)new_tab(event.window);
+        break;
+    }
+}
+
+StripLayout Shell::layout(WindowId window) const {
+    const auto* w = model_.window(window);
+    return Layout::tab_strip(platform_.client_size(window).width, w ? w->tabs.size() : 0,
+                             platform_.scale(window));
+}
+
+TabId Shell::tab_at(WindowId window, Point client) const {
+    const auto* w = model_.window(window);
+    if (!w) return 0;
+    const auto strip = layout(window);
+    for (std::size_t i = strip.tabs.size(); i-- > 0;) {
+        if (strip.tabs[i].contains(client)) return w->tabs[i].id;
+    }
+    return 0;
+}
+
+bool Shell::over_strip(WindowId window, Point screen) const {
+    if (!model_.window(window)) return false;
+    const Point origin = platform_.client_origin(window);
+    const auto strip = layout(window);
+    const int magnetism = static_cast<int>(std::lround(15.0f * platform_.scale(window)));
+    return screen.x >= origin.x && screen.x < origin.x + platform_.client_size(window).width &&
+           screen.y >= origin.y - magnetism && screen.y < origin.y + strip.height + magnetism;
+}
+
+bool Shell::caption_hit(WindowId window, Point client) const {
+    if (!model_.window(window)) return false;
+    const auto strip = layout(window);
+    const int width = platform_.client_size(window).width;
+    return client.y >= 0 && client.y < strip.height &&
+           client.x < width - static_cast<int>(120 * platform_.scale(window)) &&
+           !strip.new_tab.contains(client) && tab_at(window, client) == 0;
+}
+
+void Shell::handle_pointer(const Event& event) {
+    const auto strip = layout(event.window);
+    if (event.type == EventType::PointerDown) {
+        if (event.client.y >= strip.height) {
+            client_.body_event(event, {0, strip.height, event.size.width,
+                                       event.size.height - strip.height});
+            return;
+        }
+        const int caption_start = platform_.client_size(event.window).width -
+                                  static_cast<int>(120 * platform_.scale(event.window));
+        if (event.client.x >= caption_start) {
+            const int button_width = static_cast<int>(40 * platform_.scale(event.window));
+            const int button = (event.client.x - caption_start) / std::max(1, button_width);
+            if (button == 0) platform_.minimize(event.window);
+            else if (button == 1) platform_.toggle_maximize(event.window);
+            else close_window(event.window);
+            return;
+        }
+        if (strip.new_tab.contains(event.client)) {
+            (void)new_tab(event.window);
+            return;
+        }
+        const TabId id = tab_at(event.window, event.client);
+        if (!id) return;
+        const WindowTabs* w = model_.window(event.window);
+        const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+                                     [id](const Tab& tab) { return tab.id == id; });
+        const std::size_t index = static_cast<std::size_t>(it - w->tabs.begin());
+        const Rect rect = strip.tabs[index];
+        if (event.client.x >= rect.right() - static_cast<int>(23 * platform_.scale(event.window))) {
+            (void)close_tab(event.window, id);
+            return;
+        }
+        (void)select_tab(event.window, id);
+        drag_ = {DragPhase::Pressed, event.window, 0, id, event.screen, event.client,
+                 event.screen};
+        platform_.capture_pointer(event.window);
+        return;
+    }
+    if (event.type == EventType::CaptureLost) {
+        if (drag_.phase != DragPhase::NativeWindow) drag_ = {};
+        return;
+    }
+    if (event.type == EventType::PointerUp) {
+        if (drag_.phase == DragPhase::Idle && event.client.y >= strip.height) {
+            client_.body_event(event, {0, strip.height, event.size.width,
+                                       event.size.height - strip.height});
+        }
+        if (drag_.phase != DragPhase::NativeWindow) {
+            drag_ = {};
+            platform_.release_pointer();
+        }
+        return;
+    }
+    if (drag_.phase == DragPhase::Idle || event.window != drag_.window) {
+        if (event.client.y >= strip.height) {
+            client_.body_event(event, {0, strip.height, event.size.width,
+                                       event.size.height - strip.height});
+        }
+        return;
+    }
+    const int dx = event.screen.x - drag_.press_screen.x;
+    const int dy = event.screen.y - drag_.press_screen.y;
+    const int slop = static_cast<int>(std::lround(6.0f * platform_.scale(event.window)));
+    if (drag_.phase == DragPhase::Pressed && dx * dx + dy * dy > slop * slop)
+        drag_.phase = DragPhase::InStrip;
+    if (drag_.phase != DragPhase::InStrip) return;
+    drag_.current_screen = event.screen;
+
+    const WindowTabs* w = model_.window(event.window);
+    if (!w) return;
+    if (w->tabs.size() == 1 || !over_strip(event.window, event.screen)) {
+        start_native_drag(event.window, event.screen);
+        return;
+    }
+    auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+                           [this](const Tab& tab) { return tab.id == drag_.tab; });
+    if (it == w->tabs.end()) return;
+    const std::size_t from = static_cast<std::size_t>(it - w->tabs.begin());
+    const std::size_t to = Layout::insertion_index(strip, event.client.x, from);
+    if (from != to && model_.move_tab(event.window, drag_.tab, to))
+        platform_.invalidate(event.window);
+}
+
+void Shell::start_native_drag(WindowId window, Point screen) {
+    if (!platform_.supports_native_move_loop()) {
+        drag_ = {};
+        platform_.release_pointer();
+        return;
+    }
+    const WindowTabs* w = model_.window(window);
+    if (!w) return;
+    if (w->tabs.size() > 1) {
+        const Size size = platform_.client_size(window);
+        const Rect bounds{screen.x - drag_.grab_client.x, screen.y - drag_.grab_client.y,
+                          size.width, size.height};
+        const WindowId torn = open_window(bounds, false, false);
+        if (!torn) return;
+        if (!model_.transfer_tab(window, torn, drag_.tab, 0)) {
+            request_destroy(torn);
+            return;
+        }
+        platform_.invalidate(window);
+        drag_.window = torn;
+        drag_.phase = DragPhase::NativeWindow;
+        platform_.invalidate(torn);
+        platform_.show(torn);
+    }
+    drag_.phase = DragPhase::NativeWindow;
+    platform_.set_client_origin(drag_.window,
+                                {screen.x - drag_.grab_client.x,
+                                 screen.y - drag_.grab_client.y});
+    platform_.release_pointer();
+    // The first frame must be visible before the synchronous OS move loop.
+    paint(drag_.window);
+    platform_.run_native_move_loop(drag_.window);
+    finish_native_drag();
+}
+
+void Shell::handle_moving(const Event& event) {
+    if (drag_.phase != DragPhase::NativeWindow || event.window != drag_.window) return;
+    drag_.current_screen = event.screen;
+    const WindowId target = platform_.window_at(event.screen, drag_.window);
+    if (!target || !over_strip(target, event.screen)) return;
+    drag_.pending_target = target;
+    platform_.end_native_move_loop(drag_.window);
+}
+
+void Shell::finish_native_drag() {
+    if (drag_.phase != DragPhase::NativeWindow) return;
+    const WindowId source = drag_.window;
+    const WindowId target = drag_.pending_target;
+    if (target && model_.window(target) && model_.window(source)) {
+        const auto target_layout = layout(target);
+        const Point origin = platform_.client_origin(target);
+        const int x = drag_.current_screen.x - origin.x;
+        const std::size_t index = Layout::insertion_index(target_layout, x, target_layout.tabs.size());
+        if (model_.transfer_tab(source, target, drag_.tab, index)) {
+            platform_.invalidate(target);
+            if (model_.window(source)->tabs.empty()) request_destroy(source);
+            else platform_.invalidate(source);
+        }
+    }
+    drag_ = {};
+}
+
+void Shell::paint(WindowId window) {
+    SkCanvas* canvas = renderer_.canvas(window);
+    const auto* w = model_.window(window);
+    if (!canvas || !w) return;
+    const Size size = platform_.client_size(window);
+    const float scale = platform_.scale(window);
+    const StripLayout strip = layout(window);
+    canvas->clear(SK_ColorWHITE);
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    paint.setColor(SkColorSetRGB(38, 43, 51));
+    canvas->drawRect(SkRect::MakeXYWH(0, 0, static_cast<float>(size.width),
+                                     static_cast<float>(strip.height)), paint);
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        const Tab& tab = w->tabs[i];
+        const Rect r = strip.tabs[i];
+        paint.setColor(tab.id == w->active ? SkColorSetRGB(249, 250, 252)
+                                          : SkColorSetRGB(75, 81, 91));
+        canvas->drawRoundRect(skrect(r), 7.0f * scale, 7.0f * scale, paint);
+        canvas->save();
+        canvas->clipRect(SkRect::MakeXYWH(static_cast<float>(r.x + 12 * scale),
+                                          static_cast<float>(r.y),
+                                          static_cast<float>(r.width - 39 * scale),
+                                          static_cast<float>(r.height)));
+        text(*canvas, tab.title, r.x + 12 * scale, r.y + 23 * scale, 13 * scale,
+             tab.id == w->active ? SkColorSetRGB(31, 37, 45) : SK_ColorWHITE);
+        canvas->restore();
+        text(*canvas, "x", r.right() - 18 * scale, r.y + 23 * scale, 14 * scale,
+             tab.id == w->active ? SkColorSetRGB(70, 76, 84) : SK_ColorWHITE);
+    }
+    text(*canvas, "+", strip.new_tab.x + 6 * scale, strip.new_tab.y + 22 * scale,
+         22 * scale, SK_ColorWHITE);
+    const int caption_start = size.width - static_cast<int>(120 * scale);
+    text(*canvas, "_", caption_start + 16 * scale, 23 * scale, 16 * scale, SK_ColorWHITE);
+    text(*canvas, "[]", caption_start + 52 * scale, 23 * scale, 13 * scale, SK_ColorWHITE);
+    text(*canvas, "x", caption_start + 96 * scale, 23 * scale, 17 * scale, SK_ColorWHITE);
+    const Rect body{0, strip.height, size.width, std::max(0, size.height - strip.height)};
+    canvas->save();
+    canvas->clipRect(skrect(body));
+    client_.paint_body(window, w->active, *canvas, body);
+    canvas->restore();
+    renderer_.present(window, platform_.native_handle(window));
+}
+
+} // namespace tabengine
