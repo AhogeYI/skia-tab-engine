@@ -38,7 +38,8 @@ struct Event {
 // UTF-16 backends receive an astral character as a high + low surrogate pair
 // across two messages. Feed each unit; a code point completes when feed()
 // returns true. A dangling high surrogate before a non-surrogate unit is
-// dropped; a lone low surrogate passes through unchanged.
+// dropped; a lone low surrogate is also dropped because it is not a Unicode
+// scalar value and cannot be encoded as valid UTF-8 by clients.
 struct SurrogateComposer {
     char32_t pending_high = 0;
     char32_t code_point = 0;
@@ -53,6 +54,9 @@ struct SurrogateComposer {
             return true;
         }
         pending_high = 0;
+        if (unit >= 0xDC00 && unit <= 0xDFFF) {
+            return false;
+        }
         code_point = unit;
         return true;
     }

@@ -1,6 +1,6 @@
 #include "tabengine/shell.h"
 
-#include <cassert>
+#include "check.h"
 #include <functional>
 #include <string_view>
 #include <unordered_map>
@@ -120,17 +120,17 @@ void check_rollback(MoveLoopResult result, bool escape = false) {
     drag_first_tab(platform, source);
 
     const WindowTabs* restored = shell.model().window(source);
-    assert(restored && restored->tabs.size() == 2);
-    assert(restored->tabs[0].id == first.id);
-    assert(restored->tabs[0].content == first.content);
-    assert(restored->tabs[1].id == second);
-    assert(restored->active == first.id);
-    assert(shell.model().window_ids().size() == 1);
-    assert(platform.windows.size() == 1);
-    assert(platform.moved != source);
-    assert(client.detached.size() == 2);
-    assert(client.attached.size() == 4);
-    assert(client.closed.empty());
+    CHECK(restored && restored->tabs.size() == 2);
+    CHECK(restored->tabs[0].id == first.id);
+    CHECK(restored->tabs[0].content == first.content);
+    CHECK(restored->tabs[1].id == second);
+    CHECK(restored->active == first.id);
+    CHECK(shell.model().window_ids().size() == 1);
+    CHECK(platform.windows.size() == 1);
+    CHECK(platform.moved != source);
+    CHECK(client.detached.size() == 2);
+    CHECK(client.attached.size() == 4);
+    CHECK(client.closed.empty());
 }
 
 void check_completed_tear_off() {
@@ -144,12 +144,12 @@ void check_completed_tear_off() {
     (void)shell.new_tab(source);
     drag_first_tab(platform, source);
 
-    assert(shell.model().window_ids().size() == 2);
-    assert(shell.model().window(source)->tabs.size() == 1);
+    CHECK(shell.model().window_ids().size() == 2);
+    CHECK(shell.model().window(source)->tabs.size() == 1);
     const WindowTabs* torn = shell.model().window(platform.moved);
-    assert(torn && torn->tabs.size() == 1);
-    assert(torn->tabs[0].id == first.id && torn->tabs[0].content == first.content);
-    assert(client.closed.empty());
+    CHECK(torn && torn->tabs.size() == 1);
+    CHECK(torn->tabs[0].id == first.id && torn->tabs[0].content == first.content);
+    CHECK(client.closed.empty());
 }
 
 void check_target_attach(bool escape) {
@@ -165,12 +165,12 @@ void check_target_attach(bool escape) {
     platform.escape = escape;
     drag_first_tab(platform, source);
 
-    assert(platform.end_calls >= 1);
-    assert(shell.model().window_ids().size() == 2);
+    CHECK(platform.end_calls >= 1);
+    CHECK(shell.model().window_ids().size() == 2);
     const WindowTabs* destination = shell.model().window(escape ? source : target);
-    assert(destination->active == first.id);
-    assert(destination->tabs.size() == 2);
-    assert(client.closed.empty());
+    CHECK(destination->active == first.id);
+    CHECK(destination->tabs.size() == 2);
+    CHECK(client.closed.empty());
 }
 
 void check_single_tab_cancel() {
@@ -182,11 +182,11 @@ void check_single_tab_cancel() {
     const Tab first = shell.model().window(source)->tabs.front();
     drag_first_tab(platform, source);
 
-    assert(platform.moved == source);
-    assert(shell.model().window_ids().size() == 1);
-    assert(shell.model().window(source)->tabs[0].id == first.id);
-    assert(client.detached.empty());
-    assert(client.closed.empty());
+    CHECK(platform.moved == source);
+    CHECK(shell.model().window_ids().size() == 1);
+    CHECK(shell.model().window(source)->tabs[0].id == first.id);
+    CHECK(client.detached.empty());
+    CHECK(client.closed.empty());
 }
 
 void check_source_closed_during_cancel() {
@@ -200,13 +200,13 @@ void check_source_closed_during_cancel() {
     platform.during_move = [&] { shell.close_window(source); };
     drag_first_tab(platform, source);
 
-    assert(!shell.model().window(source));
-    assert(shell.model().window_ids().size() == 1);
+    CHECK(!shell.model().window(source));
+    CHECK(shell.model().window_ids().size() == 1);
     const WindowTabs* torn = shell.model().window(platform.moved);
-    assert(torn && torn->tabs.size() == 1);
-    assert(torn->tabs[0].id == first.id && torn->tabs[0].content == first.content);
-    assert(client.closed.size() == 1);
-    assert(client.closed[0] != first.content);
+    CHECK(torn && torn->tabs.size() == 1);
+    CHECK(torn->tabs[0].id == first.id && torn->tabs[0].content == first.content);
+    CHECK(client.closed.size() == 1);
+    CHECK(client.closed[0] != first.content);
 }
 } // namespace
 

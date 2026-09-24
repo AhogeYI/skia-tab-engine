@@ -1,6 +1,6 @@
 #include "tabengine/shell.h"
 
-#include <cassert>
+#include "check.h"
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -100,34 +100,35 @@ public:
 
 void check_composer_pairs_astral() {
     SurrogateComposer composer;
-    assert(!composer.feed(0xD83D)); // high surrogate of U+1F600
-    assert(composer.feed(0xDE00));
-    assert(composer.code_point == 0x1F600);
+    CHECK(!composer.feed(0xD83D)); // high surrogate of U+1F600
+    CHECK(composer.feed(0xDE00));
+    CHECK(composer.code_point == 0x1F600);
 }
 
 void check_composer_bmp_direct() {
     SurrogateComposer composer;
     // U+9C7C, a CJK ideograph outside the ASCII range.
-    assert(composer.feed(0x9C7C));
-    assert(composer.code_point == 0x9C7C);
+    CHECK(composer.feed(0x9C7C));
+    CHECK(composer.code_point == 0x9C7C);
 }
 
-void check_composer_lone_low_passes_through() {
+void check_composer_lone_low_is_dropped() {
     SurrogateComposer composer;
-    assert(composer.feed(0xDE00));
-    assert(composer.code_point == 0xDE00);
+    CHECK(!composer.feed(0xDE00));
+    CHECK(composer.feed('b'));
+    CHECK(composer.code_point == 'b');
 }
 
 void check_composer_dangling_high_dropped() {
     SurrogateComposer composer;
-    assert(!composer.feed(0xD83D));
-    assert(composer.feed('a'));
-    assert(composer.code_point == 'a');
+    CHECK(!composer.feed(0xD83D));
+    CHECK(composer.feed('a'));
+    CHECK(composer.code_point == 'a');
     // The pair completes only while the high surrogate is current.
-    assert(!composer.feed(0xD83D));
-    assert(!composer.feed(0xD83D));
-    assert(composer.feed(0xDE00));
-    assert(composer.code_point == 0x1F600);
+    CHECK(!composer.feed(0xD83D));
+    CHECK(!composer.feed(0xD83D));
+    CHECK(composer.feed(0xDE00));
+    CHECK(composer.code_point == 0x1F600);
 }
 
 void check_shell_forwards_text_to_body() {
@@ -141,14 +142,14 @@ void check_shell_forwards_text_to_body() {
     platform.emit({EventType::TextInput, window, {}, {}, {}, 0, false, false, false, 'x'});
     platform.emit({EventType::TextInput, window, {}, {}, {}, 0, false, false, false, 0x1F600});
 
-    assert((client.received == std::vector<char32_t>{'x', 0x1F600}));
+    CHECK((client.received == std::vector<char32_t>{'x', 0x1F600}));
     // Text is not a shortcut and never triggers the engine's key bindings.
-    assert(client.shortcuts == 0);
-    assert(shell.model().window(window)->tabs.size() == tabs_before);
+    CHECK(client.shortcuts == 0);
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before);
     // The body rect passed to the client matches a KeyDown's body rect.
     platform.emit({EventType::KeyDown, window, {}, {}, {}, 0x25, false, false, true});
-    assert(client.alt_left == 1);
-    assert(client.body_height > 0);
+    CHECK(client.alt_left == 1);
+    CHECK(client.body_height > 0);
 }
 
 void check_shell_drops_text_for_unknown_window() {
@@ -159,7 +160,7 @@ void check_shell_drops_text_for_unknown_window() {
     const WindowId window = shell.open_window({100, 100, 900, 600});
     shell.close_window(window);
     platform.emit({EventType::TextInput, window, {}, {}, {}, 0, false, false, false, 'x'});
-    assert(client.received.empty());
+    CHECK(client.received.empty());
 }
 
 // Wheels always belong to the body, with the client point carried along.
@@ -183,10 +184,10 @@ void check_shell_forwards_wheel_to_body() {
     down.wheel = -240;
     platform.emit(down);
 
-    assert(client.wheels.size() == 2);
-    assert(client.wheels[0][0] == 120 && client.wheels[0][1] == 130);
-    assert(client.wheels[1][0] == -240 && client.wheels[1][2] == 240);
-    assert(client.shortcuts == 0);
+    CHECK(client.wheels.size() == 2);
+    CHECK(client.wheels[0][0] == 120 && client.wheels[0][1] == 130);
+    CHECK(client.wheels[1][0] == -240 && client.wheels[1][2] == 240);
+    CHECK(client.shortcuts == 0);
 }
 
 } // namespace
@@ -194,7 +195,7 @@ void check_shell_forwards_wheel_to_body() {
 int main() {
     check_composer_pairs_astral();
     check_composer_bmp_direct();
-    check_composer_lone_low_passes_through();
+    check_composer_lone_low_is_dropped();
     check_composer_dangling_high_dropped();
     check_shell_forwards_text_to_body();
     check_shell_drops_text_for_unknown_window();

@@ -4,7 +4,7 @@
 #include "include/core/SkPixmap.h"
 
 #include <algorithm>
-#include <cassert>
+#include "check.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -133,7 +133,7 @@ void check_hover_paint_order() {
     Client client;
     tabengine::Shell shell(platform, *renderer, client);
     const auto window = shell.open_window({100, 100, 900, 600});
-    assert(platform.title(window) == "Test Product");
+    CHECK(platform.title(window) == "Test Product");
     const auto first = shell.model().window(window)->tabs.front().id;
     const auto second = shell.new_tab(window);
     const auto active = shell.new_tab(window);
@@ -142,7 +142,7 @@ void check_hover_paint_order() {
     platform.emit({tabengine::EventType::PointerMove, window, {70, 20}, {170, 120}});
     client.clear_paint_order();
     platform.emit({tabengine::EventType::Paint, window});
-    assert((client.paint_order() == std::vector<tabengine::TabId>{second, first, active}));
+    CHECK((client.paint_order() == std::vector<tabengine::TabId>{second, first, active}));
 }
 
 void check_hover_card_visual() {
@@ -155,33 +155,33 @@ void check_hover_card_visual() {
     (void)shell.new_tab(window);
     platform.now = 0.25;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(shell.select_tab(window, first));
+    CHECK(shell.select_tab(window, first));
     const auto pixel = [&] {
         platform.emit({tabengine::EventType::Paint, window});
         SkPixmap pixels;
-        assert(renderer->canvas(window)->peekPixels(&pixels));
+        CHECK(renderer->canvas(window)->peekPixels(&pixels));
         return pixels.getColor(250, 60);
     };
     const SkColor body = pixel();
     platform.emit({tabengine::EventType::PointerMove, window, {70, 20}, {170, 120}});
     platform.now = 0.54;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(pixel() == body);
+    CHECK(pixel() == body);
     platform.now = 0.55;
     platform.emit({tabengine::EventType::AnimationFrame, window});
     platform.now = 0.65;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(pixel() != body);
+    CHECK(pixel() != body);
     platform.now = 0.76;
     platform.emit({tabengine::EventType::AnimationFrame, window});
     platform.emit({tabengine::EventType::PointerMove, window, {320, 20}, {420, 120}});
     platform.emit({tabengine::EventType::Paint, window});
-    assert(client.preview_paints() > 0);
+    CHECK(client.preview_paints() > 0);
     platform.emit({tabengine::EventType::PointerMove, window, {250, 60}, {350, 160}});
     platform.emit({tabengine::EventType::PointerLeave, window});
     platform.now = 0.92;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(pixel() == body);
+    CHECK(pixel() == body);
 }
 
 void check_hover_and_reorder_visual() {
@@ -195,11 +195,11 @@ void check_hover_and_reorder_visual() {
     const auto third = shell.new_tab(window);
     platform.now = 0.25;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(shell.select_tab(window, first));
+    CHECK(shell.select_tab(window, first));
     const auto pixel = [&] {
         platform.emit({tabengine::EventType::Paint, window});
         SkPixmap pixels;
-        assert(renderer->canvas(window)->peekPixels(&pixels));
+        CHECK(renderer->canvas(window)->peekPixels(&pixels));
         return pixels.getColor(400, 15);
     };
     const SkColor idle = pixel();
@@ -210,15 +210,15 @@ void check_hover_and_reorder_visual() {
     platform.now = 0.38;
     platform.emit({tabengine::EventType::AnimationFrame, window});
     const SkColor full_hover = pixel();
-    assert(idle != mid_hover && mid_hover != full_hover);
+    CHECK(idle != mid_hover && mid_hover != full_hover);
     platform.emit({tabengine::EventType::PointerLeave, window});
     platform.now = 0.51;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(pixel() == idle);
+    CHECK(pixel() == idle);
 
     platform.emit({tabengine::EventType::PointerDown, window, {70, 20}, {170, 120}});
     platform.emit({tabengine::EventType::PointerMove, window, {700, 20}, {800, 120}});
-    assert(shell.model().window(window)->tabs[0].id == second);
+    CHECK(shell.model().window(window)->tabs[0].id == second);
     platform.emit({tabengine::EventType::Paint, window});
     const int neighbor_start = client.icon_x(second);
     platform.now = 0.61;
@@ -229,9 +229,9 @@ void check_hover_and_reorder_visual() {
     platform.emit({tabengine::EventType::AnimationFrame, window});
     platform.emit({tabengine::EventType::Paint, window});
     const int neighbor_end = client.icon_x(second);
-    assert(neighbor_start > neighbor_mid && neighbor_mid > neighbor_end);
-    assert(shell.model().window(window)->tabs[2].id == first);
-    assert(third != first && third != second);
+    CHECK(neighbor_start > neighbor_mid && neighbor_mid > neighbor_end);
+    CHECK(shell.model().window(window)->tabs[2].id == first);
+    CHECK(third != first && third != second);
 }
 
 void check_close_visual() {
@@ -246,20 +246,20 @@ void check_close_visual() {
     const auto pixel = [&] {
         platform.emit({tabengine::EventType::Paint, window});
         SkPixmap pixels;
-        assert(renderer->canvas(window)->peekPixels(&pixels));
+        CHECK(renderer->canvas(window)->peekPixels(&pixels));
         return pixels.getColor(400, 15);
     };
-    assert(shell.close_tab(window, closing));
+    CHECK(shell.close_tab(window, closing));
     const SkColor before_shrink = pixel();
-    assert(client.closed().empty());
+    CHECK(client.closed().empty());
     platform.now = 0.35;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(pixel() != before_shrink);
-    assert(shell.model().window(window)->tabs.size() == 2);
+    CHECK(pixel() != before_shrink);
+    CHECK(shell.model().window(window)->tabs.size() == 2);
     platform.now = 0.46;
     platform.emit({tabengine::EventType::AnimationFrame, window});
-    assert(shell.model().window(window)->tabs.size() == 1);
-    assert(client.closed().size() == 1);
+    CHECK(shell.model().window(window)->tabs.size() == 1);
+    CHECK(client.closed().size() == 1);
 }
 
 } // namespace
@@ -278,66 +278,66 @@ int main() {
     const auto pixel_at = [&](int x, int y) {
         platform.emit({tabengine::EventType::Paint, source});
         SkPixmap pixels;
-        assert(renderer->canvas(source)->peekPixels(&pixels));
+        CHECK(renderer->canvas(source)->peekPixels(&pixels));
         return pixels.getColor(x, y);
     };
     const SkColor opening = pixel_at(350, 15);
     platform.now = 0.25;
     platform.emit({tabengine::EventType::AnimationFrame, source});
-    assert(pixel_at(350, 15) != opening);
+    CHECK(pixel_at(350, 15) != opening);
     platform.emit({tabengine::EventType::PointerDown, source, {70, 20}, {170, 120}});
     const SkColor settled = pixel_at(290, 15);
     const int before_move = platform.invalidations();
     platform.emit({tabengine::EventType::PointerMove, source, {90, 20}, {190, 120}});
-    assert(platform.invalidations() > before_move);
-    assert(shell.model().window(source)->tabs.front().id == moving_tab);
+    CHECK(platform.invalidations() > before_move);
+    CHECK(shell.model().window(source)->tabs.front().id == moving_tab);
     const SkColor following = pixel_at(290, 15);
-    assert(following != settled);
+    CHECK(following != settled);
     const int before_release = platform.invalidations();
     platform.emit({tabengine::EventType::PointerUp, source, {90, 20}, {190, 120}});
-    assert(platform.invalidations() > before_release);
+    CHECK(platform.invalidations() > before_release);
     platform.now = 0.50;
     platform.emit({tabengine::EventType::AnimationFrame, source});
-    assert(pixel_at(290, 15) == settled);
+    CHECK(pixel_at(290, 15) == settled);
 
     platform.emit({tabengine::EventType::PointerDown, source, {70, 20}, {170, 120}});
     platform.emit({tabengine::EventType::PointerMove, source, {70, 100}, {170, 200}});
 
-    assert(platform.ended());
-    assert(shell.model().window_ids().size() == 2);
-    assert(shell.model().window(source)->tabs.size() == 1);
+    CHECK(platform.ended());
+    CHECK(shell.model().window_ids().size() == 2);
+    CHECK(shell.model().window(source)->tabs.size() == 1);
     const auto* destination = shell.model().window(target);
-    assert(destination->tabs.size() == 2);
-    assert(destination->active == moving_tab);
+    CHECK(destination->tabs.size() == 2);
+    CHECK(destination->active == moving_tab);
     bool preserved = false;
     for (const auto& tab : destination->tabs) {
         if (tab.id == moving_tab && tab.content == moving_content) preserved = true;
     }
-    assert(preserved);
-    assert(client.closed().empty());
+    CHECK(preserved);
+    CHECK(client.closed().empty());
     platform.resize_without_event(target, {640, 480});
     platform.emit({tabengine::EventType::Paint, target});
-    assert(renderer->info(target).surface_size.width == 640);
-    assert(renderer->info(target).surface_size.height == 480);
+    CHECK(renderer->info(target).surface_size.width == 640);
+    CHECK(renderer->info(target).surface_size.height == 480);
 
     const auto before_cycle = shell.model().window(target)->active;
     platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 9, true});
-    assert(shell.model().window(target)->active != before_cycle);
+    CHECK(shell.model().window(target)->active != before_cycle);
     platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 9, true, true});
-    assert(shell.model().window(target)->active == before_cycle);
+    CHECK(shell.model().window(target)->active == before_cycle);
 
     const auto plus = tabengine::Layout::tab_strip(640, destination->tabs.size(), 1.0f).new_tab;
     platform.emit({tabengine::EventType::PointerDown, target,
                    {plus.x + plus.width / 2, plus.y + plus.height / 2}, {0, 0}});
-    assert(shell.model().window(target)->tabs.size() == 3);
+    CHECK(shell.model().window(target)->tabs.size() == 3);
 
     platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 'N', true});
     const auto ids = shell.model().window_ids();
-    assert(ids.size() == 3);
+    CHECK(ids.size() == 3);
     const auto new_window = *std::max_element(ids.begin(), ids.end());
     platform.emit({tabengine::EventType::KeyDown, new_window, {}, {}, {}, 'W', true});
-    assert(shell.model().window_ids().size() == 2);
-    assert(client.closed().size() == 1);
+    CHECK(shell.model().window_ids().size() == 2);
+    CHECK(client.closed().size() == 1);
     check_close_visual();
     check_hover_and_reorder_visual();
     check_hover_card_visual();
