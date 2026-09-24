@@ -19,6 +19,7 @@ struct Tab {
     bool pinned = false;
     bool loading = false;
     bool attention = false;
+    bool closing = false;
 };
 
 struct WindowTabs {
@@ -51,6 +52,7 @@ public:
     [[nodiscard]] bool transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t index);
     [[nodiscard]] bool update_tab(WindowId window, TabId tab, std::string title, bool loading,
                                   bool attention);
+    [[nodiscard]] bool set_tab_closing(WindowId window, TabId tab);
     [[nodiscard]] const WindowTabs* window(WindowId id) const;
     [[nodiscard]] WindowTabs* window(WindowId id);
     [[nodiscard]] std::vector<WindowId> window_ids() const;
@@ -64,4 +66,3 @@ private:
 };
 
 } // namespace tabengine
-

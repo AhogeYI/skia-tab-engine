@@ -9,6 +9,7 @@
 #include <memory>
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -88,12 +89,49 @@ private:
         bool cancel_requested = false;
     };
 
+    struct AnimatedRect {
+        Rect from{};
+        Rect to{};
+        double started = 0.0;
+        bool running = false;
+        [[nodiscard]] Rect at(double now) const;
+        void retarget(Rect target, double now);
+        void snap(Rect value);
+        [[nodiscard]] bool active(double now) const;
+    };
+    struct AnimatedFloat {
+        float from = 0.0f;
+        float to = 0.0f;
+        double started = 0.0;
+        bool running = false;
+        [[nodiscard]] float at(double now) const;
+        void retarget(float target, double now);
+        [[nodiscard]] bool active(double now) const;
+    };
+    struct TabVisual {
+        AnimatedRect bounds;
+        AnimatedFloat hover;
+    };
+    struct WindowVisual {
+        std::unordered_map<TabId, TabVisual> tabs;
+        AnimatedFloat new_tab_hover;
+    };
+
     void handle_event(const Event& event);
     void handle_pointer(const Event& event);
     void handle_moving(const Event& event);
     void start_native_drag(WindowId window, Point screen);
     void finish_native_drag(MoveLoopResult result);
     void cancel_drag();
+    void sync_visuals(WindowId window, TabId newborn = 0, bool animate = true);
+    void settle_drag(const Drag& completed);
+    void advance_animations(WindowId window);
+    void finish_close_tab(WindowId window, TabId tab);
+    void schedule_animation(WindowId window);
+    [[nodiscard]] Rect visual_tab_bounds(WindowId window, TabId tab, Rect fallback) const;
+    [[nodiscard]] Rect visual_new_tab_bounds(WindowId window, const StripLayout& strip) const;
+    [[nodiscard]] float tab_hover_amount(WindowId window, TabId tab) const;
+    [[nodiscard]] float new_tab_hover_amount(WindowId window) const;
     void paint(WindowId window);
     void request_destroy(WindowId window);
     void flush_destroy();
@@ -120,6 +158,7 @@ private:
     Drag drag_;
     std::vector<WindowId> pending_destroy_;
     std::unordered_set<WindowId> busy_windows_;
+    std::unordered_map<WindowId, WindowVisual> visuals_;
     int dispatch_depth_ = 0;
 };
 

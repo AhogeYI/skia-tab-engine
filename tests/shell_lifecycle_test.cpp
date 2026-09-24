@@ -1,5 +1,6 @@
 #include "tabengine/shell.h"
 
+#include <algorithm>
 #include <cassert>
 #include <string_view>
 #include <tuple>
@@ -21,6 +22,8 @@ public:
     void show(WindowId) override {}
     void destroy(WindowId id) override { windows.erase(id); }
     void invalidate(WindowId) override {}
+    double monotonic_seconds() const override { return now; }
+    void request_animation_frame(WindowId) override { ++frame_requests; }
     void capture_pointer(WindowId) override {}
     void release_pointer() override { ++pointer_releases; }
     void minimize(WindowId id) override { minimized.push_back(id); }
@@ -50,6 +53,8 @@ public:
     float dpi_scale = 1.0f;
     int pointer_releases = 0;
     int native_move_loops = 0;
+    int frame_requests = 0;
+    double now = 0.0;
 };
 
 class Renderer final : public IRenderer {
@@ -134,6 +139,59 @@ public:
     int consumed_shortcuts = 0;
 };
 
+void check_animated_lifecycle() {
+    Platform platform;
+    Renderer renderer;
+    Client client;
+    Shell shell(platform, renderer, client);
+    const WindowId window = shell.open_window({0, 0, 900, 600});
+    const TabId first = shell.model().window(window)->active;
+    const TabId second = shell.new_tab(window);
+    const ContentId second_content = shell.model().window(window)->tabs[1].content;
+    assert(platform.frame_requests > 0);
+    platform.now = 0.10;
+    shell.on_event({EventType::AnimationFrame, window});
+    const TabId third = shell.new_tab(window); // Retarget while the second tab is expanding.
+    platform.now = 0.35;
+    shell.on_event({EventType::AnimationFrame, window});
+    client.denied_tab = second;
+    assert(!shell.close_tab(window, second));
+    assert(!shell.model().window(window)->tabs[1].closing);
+    client.denied_tab = 0;
+    assert(shell.close_tab(window, second));
+    assert(shell.model().window(window)->tabs[1].closing);
+    assert(shell.model().window(window)->active == third);
+    assert(!shell.select_tab(window, second));
+    assert(!shell.move_tab(window, second, 0));
+    assert(client.closed.empty() && client.detached.empty());
+    platform.now = 0.50;
+    shell.on_event({EventType::AnimationFrame, window});
+    assert(shell.model().window(window)->tabs.size() == 3);
+    assert(client.closed.empty());
+    platform.now = 0.56;
+    shell.on_event({EventType::AnimationFrame, window});
+    assert(shell.model().window(window)->tabs.size() == 2);
+    assert(shell.model().window(window)->tabs[0].id == first);
+    assert(shell.model().window(window)->tabs[1].id == third);
+    assert(client.closed == std::vector<ContentId>({second_content}));
+    shell.on_event({EventType::AnimationFrame, window});
+    assert(client.closed.size() == 1);
+
+    const WindowId short_lived = shell.open_window({0, 0, 700, 500});
+    const ContentId first_content = shell.model().window(short_lived)->tabs[0].content;
+    const TabId other = shell.new_tab(short_lived);
+    const ContentId other_content = shell.model().window(short_lived)->tabs[1].content;
+    platform.now = 0.80;
+    shell.on_event({EventType::AnimationFrame, short_lived});
+    const TabId closing = shell.model().window(short_lived)->tabs[0].id;
+    assert(shell.close_tab(short_lived, closing));
+    assert(shell.close_tab(short_lived, other)); // Last live tab closes the window.
+    assert(!shell.model().window(short_lived));
+    assert(!platform.windows.contains(short_lived));
+    assert(std::count(client.closed.begin(), client.closed.end(), first_content) == 1);
+    assert(std::count(client.closed.begin(), client.closed.end(), other_content) == 1);
+}
+
 } // namespace
 
 int main() {
@@ -171,6 +229,9 @@ int main() {
         assert(platform.minimized == std::vector<WindowId>({source}));
         assert(shell.model().window(source)->tabs.size() == 2);
 
+        platform.now = 0.25;
+        shell.on_event({EventType::AnimationFrame, source});
+
         const auto reorder_first = [&] {
             shell.on_event({EventType::PointerDown, source, {70, 20}, {70, 20}});
             shell.on_event({EventType::PointerMove, source, {450, 20}, {450, 20}});
@@ -181,10 +242,14 @@ int main() {
         shell.on_event({EventType::KeyDown, source, {}, {}, {}, 27}); // Escape
         assert(shell.model().window(source)->tabs[0].id == first);
         assert(shell.model().window(source)->tabs[1].id == moved);
+        platform.now = 0.50;
+        shell.on_event({EventType::AnimationFrame, source});
         reorder_first();
         shell.on_event({EventType::CaptureLost, source});
         assert(shell.model().window(source)->tabs[0].id == first);
         assert(shell.model().window(source)->tabs[1].id == moved);
+        platform.now = 0.75;
+        shell.on_event({EventType::AnimationFrame, source});
 
         shell.on_event({EventType::WindowActivated, source});
         shell.on_event({EventType::PointerDown, source, {70, 20}, {70, 20}});
@@ -267,4 +332,5 @@ int main() {
     assert(client.closed.size() == 4);
     assert(client.detached.size() == client.attached.size());
     assert(platform.windows.empty());
+    check_animated_lifecycle();
 }

@@ -22,6 +22,8 @@ public:
     void show(WindowId) override {}
     void destroy(WindowId id) override { windows.erase(id); }
     void invalidate(WindowId) override {}
+    double monotonic_seconds() const override { return 0.0; }
+    void request_animation_frame(WindowId) override {}
     void capture_pointer(WindowId) override {}
     void release_pointer() override {}
     void minimize(WindowId) override {}

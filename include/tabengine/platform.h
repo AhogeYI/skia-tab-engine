@@ -10,7 +10,8 @@ namespace tabengine {
 enum class EventType {
     Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
     KeyDown, CloseRequested, Moving,
-    WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged
+    WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged,
+    AnimationFrame
 };
 
 enum class MoveLoopResult { Unsupported, Completed, Canceled };
@@ -37,6 +38,9 @@ public:
     virtual void show(WindowId id) = 0;
     virtual void destroy(WindowId id) = 0;
     virtual void invalidate(WindowId id) = 0;
+    // Monotonic time and one-shot frame scheduling keep animation policy in Shell.
+    [[nodiscard]] virtual double monotonic_seconds() const = 0;
+    virtual void request_animation_frame(WindowId id) = 0;
     virtual void capture_pointer(WindowId id) = 0;
     virtual void release_pointer() = 0;
     virtual void minimize(WindowId id) = 0;

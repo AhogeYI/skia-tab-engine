@@ -109,6 +109,16 @@ bool Model::update_tab(WindowId id, TabId tab, std::string title, bool loading, 
     return true;
 }
 
+bool Model::set_tab_closing(WindowId id, TabId tab) {
+    auto* w = window(id);
+    if (!w) return false;
+    auto it = find_tab(*w, tab);
+    if (it == w->tabs.end() || it->closing) return false;
+    it->closing = true;
+    notify({ChangeKind::TabUpdated, id, 0, tab});
+    return true;
+}
+
 const WindowTabs* Model::window(WindowId id) const {
     auto it = windows_.find(id);
     return it == windows_.end() ? nullptr : &it->second;

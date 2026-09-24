@@ -9,13 +9,14 @@ This repository is being developed independently. It does not implement an addre
 - Ordered tabs, active selection, metadata updates, and transfer between windows while preserving tab and content IDs.
 - Content attach/detach and active-tab notifications, body geometry updates, and vetoable tab/window closure. Transfers keep the application-owned content alive; final closure reports it once.
 - Win32 activation, DPI, and settled window placement notifications; host-first keyboard shortcut handling; Escape, capture loss, or deactivation restores an in-strip drag's original order. A canceled native tear-off restores the original tab and content to their source window when it still exists.
+- 200 ms ease-out tab creation, close, reorder, and drag settling; 120 ms tab and new-tab hover color transitions. The platform supplies monotonic time and one-shot animation frames.
 - Width adapting tab strip, selection, close and new tab controls, pointer-following in-strip drag with a moving new-tab button, reorder, and a Win32 native window move loop for tear off and attach.
 - Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a visual workbench application.
 - DirectWrite-backed Skia UI and caption typefaces so tab titles and controls render in the Windows build.
 - Headless core and shell tests, plus a hidden-HWND renderer smoke test. The core can be configured without Skia on other platforms.
 - Configurable chrome colors and leading-slot width, application-painted tab icons and optional caption buttons, and render backend/surface-size diagnostics.
 
-The Windows demo now presents Skia drawings through D3D12 when a suitable hardware adapter and swapchain are available. If initialization or presentation fails, it uses Skia raster pixels via `StretchDIBits`. Neighbor motion and drop settling animations, keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
+The Windows demo now presents Skia drawings through D3D12 when a suitable hardware adapter and swapchain are available. If initialization or presentation fails, it uses Skia raster pixels via `StretchDIBits`. Hover cards, keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
 
 ## Build
 
@@ -53,7 +54,7 @@ Try tab selection and closing, the plus button, horizontal reordering, tearing a
 
 ## Embedding boundary
 
-`Model` owns tab presentation records and window membership. The application owns content identified by `ContentId`. `IClient` creates content, receives attach/detach/activation and body geometry callbacks, can veto tab/window closure, and controls body rendering and input. The public `Shell::move_tab` and `Shell::transfer_tab` operations route model changes through those callbacks. A transfer never calls `tab_closed`; a final close does. Reentrant structural operations on a window are rejected while a tab or window mutation callback is running. `IPlatform` owns native windows, input and move loops. `IRenderer` supplies a canvas and presents each window. The controller in `Shell` connects these contracts.
+`Model` owns tab presentation records and window membership. The application owns content identified by `ContentId`. `IClient` creates content, receives attach/detach/activation and body geometry callbacks, can veto tab/window closure, and controls body rendering and input. The public `Shell::move_tab` and `Shell::transfer_tab` operations route model changes through those callbacks. A transfer never calls `tab_closed`; a final close does. With other live tabs present, `close_tab` starts a 200 ms contraction, marks the tab `closing`, and reports `tab_detached`/`tab_closed` when the animation finishes. Closing the last live tab or its window completes immediately. Reentrant structural operations on a window are rejected while a tab or window mutation callback is running. `IPlatform` owns native windows, input, move loops, a monotonic clock, and one-shot animation frame scheduling. `IRenderer` supplies a canvas and presents each window. The controller in `Shell` connects these contracts.
 
 `Shell::set_chrome_options` changes the application-painted leading slot and reserves up to four extra caption buttons before the system controls. The host paints and handles those buttons through `IClient`; TabEngine keeps their layout and hit testing aligned with the tab strip.
 

@@ -31,6 +31,9 @@ class Layout {
 public:
     [[nodiscard]] static StripLayout tab_strip(int width_px, std::size_t count, float scale,
                                                ChromeOptions options = {});
+    [[nodiscard]] static StripLayout tab_strip(int width_px,
+                                               const std::vector<bool>& closing, float scale,
+                                               ChromeOptions options = {});
     [[nodiscard]] static std::size_t insertion_index(const StripLayout& layout, int x,
                                                      std::size_t dragged_index);
     [[nodiscard]] static DragVisual drag_visual(const StripLayout& layout,

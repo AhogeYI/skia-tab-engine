@@ -21,6 +21,8 @@ struct ChromeMetrics {
     static constexpr int caption_button_count = 3;
     static constexpr int separator_width = 2;
     static constexpr int separator_height = 16;
+    static constexpr double bounds_duration_s = 0.200;
+    static constexpr double hover_duration_s = 0.120;
 };
 
 } // namespace tabengine::detail

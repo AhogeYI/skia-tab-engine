@@ -11,6 +11,11 @@ int px(float dp, float scale) { return static_cast<int>(std::lround(dp * std::ma
 
 StripLayout Layout::tab_strip(int width_px, std::size_t count, float scale,
                               ChromeOptions options) {
+    return tab_strip(width_px, std::vector<bool>(count, false), scale, options);
+}
+
+StripLayout Layout::tab_strip(int width_px, const std::vector<bool>& closing, float scale,
+                              ChromeOptions options) {
     using M = detail::ChromeMetrics;
     StripLayout out;
     out.height = px(M::strip_height, scale);
@@ -30,22 +35,38 @@ StripLayout Layout::tab_strip(int width_px, std::size_t count, float scale,
     const int available = std::max(0, strip_width - leading - new_tab_reserve);
     const int maximum = px(M::standard_tab_width, scale);
     const int minimum = px(M::min_inactive_width, scale);
-    const int raw = count ? (available + static_cast<int>(count - 1) * overlap) /
-                                static_cast<int>(count) : maximum;
+    const std::size_t live_count = static_cast<std::size_t>(
+        std::count(closing.begin(), closing.end(), false));
+    const int raw = live_count ?
+        (available + static_cast<int>(live_count - 1) * overlap) /
+            static_cast<int>(live_count) : maximum;
     const int tab_width = std::clamp(raw, minimum, maximum);
     int x = leading;
-    out.tabs.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
+    std::vector<Rect> live_tabs;
+    live_tabs.reserve(live_count);
+    for (std::size_t i = 0; i < live_count; ++i) {
         int width = tab_width;
-        if (i + 1 == count) {
+        if (i + 1 == live_count) {
             const int remaining = available - (x - leading);
             if (remaining > 0) width = std::min(width, remaining);
         }
-        out.tabs.push_back({x, padding, width, px(M::tab_height, scale)});
+        live_tabs.push_back({x, padding, width, px(M::tab_height, scale)});
         x += width - overlap;
     }
+    out.tabs.resize(closing.size());
+    std::size_t live_index = 0;
+    for (std::size_t i = 0; i < closing.size(); ++i) {
+        if (!closing[i]) {
+            out.tabs[i] = live_tabs[live_index++];
+        } else {
+            const int close_x = live_index > 0
+                ? live_tabs[live_index - 1].right() - overlap
+                : live_tabs.empty() ? leading : live_tabs.front().x;
+            out.tabs[i] = {close_x, padding, overlap, px(M::tab_height, scale)};
+        }
+    }
     // Chromium's button begins in the last tab's lower-corner gutter.
-    const int tab_right = out.tabs.empty() ? leading : out.tabs.back().right();
+    const int tab_right = live_tabs.empty() ? leading : live_tabs.back().right();
     const int button_x = std::clamp(tab_right - bottom_radius + padding, 0,
                                     std::max(0, strip_width - new_tab_size));
     out.new_tab = {button_x, padding, new_tab_size, new_tab_size};

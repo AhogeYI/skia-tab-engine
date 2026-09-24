@@ -17,6 +17,7 @@ namespace tabengine {
 namespace {
 
 constexpr wchar_t kClassName[] = L"TabEngineWindow";
+constexpr UINT_PTR kAnimationTimer = 1;
 
 std::wstring widen(std::string_view utf8) {
     if (utf8.empty()) return {};
@@ -104,6 +105,17 @@ public:
 
     void invalidate(WindowId id) override {
         if (HWND hwnd = handle(id)) InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    double monotonic_seconds() const override {
+        return static_cast<double>(GetTickCount64()) / 1000.0;
+    }
+
+    void request_animation_frame(WindowId id) override {
+        auto it = windows_.find(id);
+        if (it == windows_.end() || it->second->frame_pending) return;
+        if (SetTimer(it->second->hwnd, kAnimationTimer, 16, nullptr))
+            it->second->frame_pending = true;
     }
 
     void capture_pointer(WindowId id) override {
@@ -222,6 +234,7 @@ private:
         bool move_loop_mouse_up = false;
         bool skip_first_moving = false;
         bool tracking_mouse = false;
+        bool frame_pending = false;
     };
 
     HWND handle(WindowId id) const {
@@ -295,6 +308,14 @@ private:
             self.emit(*native, {EventType::Paint});
             return 0;
         }
+        case WM_TIMER:
+            if (wp == kAnimationTimer) {
+                KillTimer(hwnd, kAnimationTimer);
+                native->frame_pending = false;
+                self.emit(*native, {EventType::AnimationFrame});
+                return 0;
+            }
+            break;
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE:
         case WM_LBUTTONUP: {

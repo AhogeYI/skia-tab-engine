@@ -26,6 +26,9 @@ int main() {
     assert(model.window(b)->active == 0);
     assert(changes.back().kind == tabengine::ChangeKind::TabSelected);
     assert(changes.back().tab == 0);
+    assert(model.set_tab_closing(a, first));
+    assert(model.window(a)->tabs.front().closing);
+    assert(!model.set_tab_closing(a, first));
 
     const auto layout = tabengine::Layout::tab_strip(1000, 3, 1.0f);
     assert(layout.tabs.size() == 3);
@@ -56,6 +59,13 @@ int main() {
     const auto crowded_drag = tabengine::Layout::drag_visual(crowded, 0, -100, 8, 1.0f);
     assert(crowded_drag.tab.right() <= crowded.caption_start);
     assert(crowded_drag.new_tab.right() <= crowded.caption_start);
+    const auto closing = tabengine::Layout::tab_strip(
+        1000, std::vector<bool>{false, true, false}, 1.0f);
+    assert(closing.tabs[0].width == 256);
+    assert(closing.tabs[1].width == 18);
+    assert(closing.tabs[1].x == closing.tabs[0].right() - 18);
+    assert(closing.tabs[2].x == closing.tabs[0].right() - 18);
+    assert(closing.new_tab.x == closing.tabs[2].right() - 6);
     const auto scaled = tabengine::Layout::tab_strip(1250, 3, 1.25f);
     assert(scaled.leading_slot.width == 45);
     assert(scaled.tabs[1].x == scaled.tabs[0].right() - 23);

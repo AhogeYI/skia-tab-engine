@@ -70,7 +70,71 @@ void text(SkCanvas& canvas, const std::string& value, float x, float y, float si
     paint_ui_text(canvas, value, x, y, size, color);
 }
 
+float ease_out(double elapsed, double duration) {
+    const float t = static_cast<float>(std::clamp(elapsed / duration, 0.0, 1.0));
+    return 1.0f - (1.0f - t) * (1.0f - t);
+}
+
+int interpolate(int from, int to, float t) {
+    return static_cast<int>(std::lround(from + (to - from) * t));
+}
+
+SkColor blend_color(SkColor from, SkColor to, float t) {
+    const auto channel = [t](SkColor a, SkColor b, int shift) {
+        return static_cast<SkColor>(interpolate((a >> shift) & 0xff,
+                                                (b >> shift) & 0xff, t)) << shift;
+    };
+    return channel(from, to, 24) | channel(from, to, 16) |
+           channel(from, to, 8) | channel(from, to, 0);
+}
+
 } // namespace
+
+Rect Shell::AnimatedRect::at(double now) const {
+    if (!running) return to;
+    const float t = ease_out(now - started, detail::ChromeMetrics::bounds_duration_s);
+    const int left = interpolate(from.x, to.x, t);
+    const int top = interpolate(from.y, to.y, t);
+    const int right = interpolate(from.right(), to.right(), t);
+    const int bottom = interpolate(from.bottom(), to.bottom(), t);
+    return {left, top, right - left, bottom - top};
+}
+
+void Shell::AnimatedRect::retarget(Rect target, double now) {
+    if (to.x == target.x && to.y == target.y && to.width == target.width &&
+        to.height == target.height) return;
+    from = at(now);
+    to = target;
+    started = now;
+    running = from.x != to.x || from.y != to.y || from.width != to.width ||
+              from.height != to.height;
+}
+
+void Shell::AnimatedRect::snap(Rect value) {
+    from = to = value;
+    running = false;
+}
+
+bool Shell::AnimatedRect::active(double now) const {
+    return running && now - started < detail::ChromeMetrics::bounds_duration_s;
+}
+
+float Shell::AnimatedFloat::at(double now) const {
+    return running ? from + (to - from) *
+        ease_out(now - started, detail::ChromeMetrics::hover_duration_s) : to;
+}
+
+void Shell::AnimatedFloat::retarget(float target, double now) {
+    if (to == target) return;
+    from = at(now);
+    to = target;
+    started = now;
+    running = from != to;
+}
+
+bool Shell::AnimatedFloat::active(double now) const {
+    return running && now - started < detail::ChromeMetrics::hover_duration_s;
+}
 
 Shell::Shell(IPlatform& platform, IRenderer& renderer, IClient& client)
     : platform_(platform), renderer_(renderer), client_(client) {
@@ -96,7 +160,10 @@ void Shell::set_theme(Theme theme) {
 
 void Shell::set_chrome_options(ChromeOptions options) {
     chrome_options_ = options;
-    for (WindowId id : model_.window_ids()) platform_.invalidate(id);
+    for (WindowId id : model_.window_ids()) {
+        sync_visuals(id, 0, false);
+        platform_.invalidate(id);
+    }
 }
 
 WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
@@ -122,6 +189,7 @@ WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
 TabId Shell::new_tab(WindowId window) {
     const WindowTabs* w = model_.window(window);
     if (!w || !busy_windows_.insert(window).second) return 0;
+    sync_visuals(window);
     const TabId previous = w->active;
     NewTab created = client_.create_tab();
     const TabId id = model_.add_tab(window, created.content, std::move(created.title));
@@ -129,6 +197,7 @@ TabId Shell::new_tab(WindowId window) {
         (void)model_.select_tab(window, id);
         client_.tab_attached(window, id, created.content);
         if (previous != id) client_.active_tab_changed(window, previous, id);
+        sync_visuals(window, id);
         platform_.invalidate(window);
     } else {
         client_.tab_closed(created.content);
@@ -142,34 +211,45 @@ bool Shell::close_tab(WindowId window, TabId tab) {
     if (!w || !busy_windows_.insert(window).second) return false;
     const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
                                  [tab](const Tab& item) { return item.id == tab; });
-    if (it == w->tabs.end()) {
+    if (it == w->tabs.end() || it->closing) {
         busy_windows_.erase(window);
         return false;
     }
     const ContentId content = it->content;
     const TabId previous = w->active;
-    const bool last = w->tabs.size() == 1;
+    const bool last = std::count_if(w->tabs.begin(), w->tabs.end(),
+        [](const Tab& item) { return !item.closing; }) == 1;
     if (!client_.allow_close_tab(window, tab, content) ||
-        (last && !client_.allow_close_window(window)) ||
-        !model_.close_tab(window, tab)) {
+        (last && !client_.allow_close_window(window))) {
         busy_windows_.erase(window);
         return false;
     }
-    const TabId current = model_.window(window)->active;
-    if (previous != current) client_.active_tab_changed(window, previous, current);
-    client_.tab_detached(window, tab, content);
-    client_.tab_closed(content);
-    if (const WindowTabs* remaining = model_.window(window)) {
-        if (remaining->tabs.empty()) {
-            if (drag_.window == window) {
-                if (drag_.phase != DragPhase::NativeWindow) platform_.release_pointer();
-                drag_ = {};
-            }
-            clear_hover(window);
-            request_destroy(window);
-        }
-        else platform_.invalidate(window);
+    if (last) {
+        destroy_window_contents(window);
+        busy_windows_.erase(window);
+        return true;
     }
+    if (hover_window_ == window && hover_tab_ == tab) clear_hover(window);
+    sync_visuals(window);
+    if (drag_.window == window && drag_.tab == tab) {
+        drag_ = {};
+        platform_.release_pointer();
+    }
+    const std::size_t index = static_cast<std::size_t>(it - w->tabs.begin());
+    TabId next = 0;
+    for (std::size_t i = index + 1; i < w->tabs.size(); ++i) {
+        if (!w->tabs[i].closing) { next = w->tabs[i].id; break; }
+    }
+    if (!next) {
+        for (std::size_t i = index; i-- > 0;) {
+            if (!w->tabs[i].closing) { next = w->tabs[i].id; break; }
+        }
+    }
+    (void)model_.set_tab_closing(window, tab);
+    if (previous == tab && next) (void)model_.select_tab(window, next);
+    if (previous == tab && next) client_.active_tab_changed(window, previous, next);
+    sync_visuals(window);
+    platform_.invalidate(window);
     busy_windows_.erase(window);
     return true;
 }
@@ -177,6 +257,12 @@ bool Shell::close_tab(WindowId window, TabId tab) {
 bool Shell::select_tab(WindowId window, TabId tab) {
     const WindowTabs* w = model_.window(window);
     if (!w || !busy_windows_.insert(window).second) return false;
+    const auto candidate = std::find_if(w->tabs.begin(), w->tabs.end(),
+        [tab](const Tab& item) { return item.id == tab; });
+    if (candidate == w->tabs.end() || candidate->closing) {
+        busy_windows_.erase(window);
+        return false;
+    }
     const TabId previous = w->active;
     if (!model_.select_tab(window, tab)) {
         busy_windows_.erase(window);
@@ -189,7 +275,14 @@ bool Shell::select_tab(WindowId window, TabId tab) {
 }
 
 bool Shell::move_tab(WindowId window, TabId tab, std::size_t index) {
-    if (busy_windows_.contains(window) || !model_.move_tab(window, tab, index)) return false;
+    const WindowTabs* w = model_.window(window);
+    if (!w || busy_windows_.contains(window)) return false;
+    const auto candidate = std::find_if(w->tabs.begin(), w->tabs.end(),
+        [tab](const Tab& item) { return item.id == tab; });
+    if (candidate == w->tabs.end() || candidate->closing) return false;
+    sync_visuals(window);
+    if (!model_.move_tab(window, tab, index)) return false;
+    sync_visuals(window);
     platform_.invalidate(window);
     return true;
 }
@@ -203,6 +296,9 @@ bool Shell::transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t inde
     const auto it = std::find_if(source->tabs.begin(), source->tabs.end(),
                                  [tab](const Tab& item) { return item.id == tab; });
     if (it == source->tabs.end()) return false;
+    if (it->closing) return false;
+    sync_visuals(from);
+    sync_visuals(to);
     const ContentId content = it->content;
     const TabId source_active = source->active;
     const TabId target_active = target->active;
@@ -219,6 +315,8 @@ bool Shell::transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t inde
     if (source_active != source_current)
         client_.active_tab_changed(from, source_active, source_current);
     if (target_active != tab) client_.active_tab_changed(to, target_active, tab);
+    sync_visuals(from);
+    sync_visuals(to, tab);
     platform_.invalidate(to);
     if (model_.window(from)->tabs.empty()) {
         if (drag_.window == from) {
@@ -250,7 +348,7 @@ void Shell::close_window(WindowId window) {
         return;
     }
     for (const Tab& tab : w->tabs) {
-        if (!client_.allow_close_tab(window, tab.id, tab.content)) {
+        if (!tab.closing && !client_.allow_close_tab(window, tab.id, tab.content)) {
             busy_windows_.erase(window);
             return;
         }
@@ -279,6 +377,7 @@ void Shell::destroy_window_contents(WindowId window) {
 
 void Shell::request_destroy(WindowId window) {
     if (!model_.remove_window(window)) return;
+    visuals_.erase(window);
     pending_destroy_.push_back(window);
     if (dispatch_depth_ == 0) flush_destroy();
 }
@@ -305,12 +404,14 @@ void Shell::handle_event(const Event& event) {
     case EventType::Paint: paint(event.window); break;
     case EventType::Resized:
         renderer_.resize(event.window, event.size);
+        sync_visuals(event.window, 0, false);
         client_.body_geometry_changed(event.window, body_bounds(event.window),
                                       platform_.scale(event.window));
         if (model_.window(event.window)) platform_.invalidate(event.window);
         break;
     case EventType::DpiChanged:
         renderer_.resize(event.window, platform_.client_size(event.window));
+        sync_visuals(event.window, 0, false);
         client_.dpi_changed(event.window, platform_.scale(event.window));
         if (!model_.window(event.window)) break;
         client_.body_geometry_changed(event.window, body_bounds(event.window),
@@ -343,6 +444,7 @@ void Shell::handle_event(const Event& event) {
         handle_pointer(event);
         break;
     case EventType::Moving: handle_moving(event); break;
+    case EventType::AnimationFrame: advance_animations(event.window); break;
     case EventType::CloseRequested: close_window(event.window); break;
     case EventType::KeyDown: {
         if (event.key == 27 && drag_.window == event.window &&
@@ -389,7 +491,12 @@ void Shell::handle_event(const Event& event) {
 
 StripLayout Shell::layout(WindowId window) const {
     const auto* w = model_.window(window);
-    return Layout::tab_strip(platform_.client_size(window).width, w ? w->tabs.size() : 0,
+    if (!w) return Layout::tab_strip(platform_.client_size(window).width, 0,
+                                     platform_.scale(window), chrome_options_);
+    std::vector<bool> closing;
+    closing.reserve(w->tabs.size());
+    for (const Tab& tab : w->tabs) closing.push_back(tab.closing);
+    return Layout::tab_strip(platform_.client_size(window).width, closing,
                              platform_.scale(window), chrome_options_);
 }
 
@@ -399,19 +506,194 @@ Rect Shell::body_bounds(WindowId window) const {
     return {0, top, size.width, std::max(0, size.height - top)};
 }
 
+void Shell::sync_visuals(WindowId window, TabId newborn, bool animate) {
+    const WindowTabs* w = model_.window(window);
+    if (!w) return;
+    const double now = platform_.monotonic_seconds();
+    const StripLayout strip = layout(window);
+    auto& visual = visuals_[window];
+    for (auto it = visual.tabs.begin(); it != visual.tabs.end();) {
+        const bool present = std::any_of(w->tabs.begin(), w->tabs.end(),
+            [id = it->first](const Tab& tab) { return tab.id == id; });
+        if (!present) it = visual.tabs.erase(it);
+        else ++it;
+    }
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        const Tab& tab = w->tabs[i];
+        const Rect target = strip.tabs[i];
+        auto [it, inserted] = visual.tabs.try_emplace(tab.id);
+        AnimatedRect& bounds = it->second.bounds;
+        if (inserted) {
+            Rect start = target;
+            if (animate && tab.id == newborn && w->tabs.size() > 1) {
+                const int overlap = static_cast<int>(std::lround(
+                    detail::ChromeMetrics::overlap * platform_.scale(window)));
+                start.width = overlap;
+                if (i > 0) {
+                    const TabId previous = w->tabs[i - 1].id;
+                    start.x = visual_tab_bounds(window, previous, strip.tabs[i - 1]).right() -
+                              overlap;
+                } else if (i + 1 < w->tabs.size()) {
+                    const TabId next = w->tabs[i + 1].id;
+                    start.x = visual_tab_bounds(window, next, strip.tabs[i + 1]).x;
+                }
+            }
+            bounds.snap(start);
+            if (hover_window_ == window && hover_tab_ == tab.id)
+                it->second.hover.retarget(1.0f, now);
+        }
+        if (!animate || (drag_.phase == DragPhase::InStrip &&
+                         drag_.window == window && drag_.tab == tab.id)) {
+            bounds.snap(target);
+        } else {
+            bounds.retarget(target, now);
+        }
+    }
+    schedule_animation(window);
+}
+
+Rect Shell::visual_tab_bounds(WindowId window, TabId tab, Rect fallback) const {
+    const auto visual = visuals_.find(window);
+    if (visual == visuals_.end()) return fallback;
+    const auto it = visual->second.tabs.find(tab);
+    if (it == visual->second.tabs.end()) return fallback;
+    return it->second.bounds.at(platform_.monotonic_seconds());
+}
+
+Rect Shell::visual_new_tab_bounds(WindowId window, const StripLayout& strip) const {
+    const WindowTabs* w = model_.window(window);
+    if (!w || w->tabs.empty()) return strip.new_tab;
+    int right = 0;
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        Rect bounds = visual_tab_bounds(window, w->tabs[i].id, strip.tabs[i]);
+        if (drag_.phase == DragPhase::InStrip && drag_.window == window &&
+            drag_.tab == w->tabs[i].id) {
+            const Point origin = platform_.client_origin(window);
+            bounds = Layout::drag_visual(strip, i,
+                drag_.current_screen.x - origin.x, drag_.grab_tab_x,
+                platform_.scale(window)).tab;
+        }
+        right = std::max(right, bounds.right());
+    }
+    const float scale = platform_.scale(window);
+    const int radius = static_cast<int>(std::lround(detail::ChromeMetrics::bottom_radius * scale));
+    const int padding = static_cast<int>(std::lround(detail::ChromeMetrics::strip_padding * scale));
+    Rect button = strip.new_tab;
+    button.x = std::clamp(right - radius + padding, 0,
+                          std::max(0, strip.caption_start - button.width));
+    return button;
+}
+
+float Shell::tab_hover_amount(WindowId window, TabId tab) const {
+    const auto visual = visuals_.find(window);
+    if (visual == visuals_.end()) return 0.0f;
+    const auto it = visual->second.tabs.find(tab);
+    return it == visual->second.tabs.end() ? 0.0f :
+        it->second.hover.at(platform_.monotonic_seconds());
+}
+
+float Shell::new_tab_hover_amount(WindowId window) const {
+    const auto visual = visuals_.find(window);
+    return visual == visuals_.end() ? 0.0f :
+        visual->second.new_tab_hover.at(platform_.monotonic_seconds());
+}
+
+void Shell::schedule_animation(WindowId window) {
+    const auto visual = visuals_.find(window);
+    const WindowTabs* w = model_.window(window);
+    if (visual == visuals_.end() || !w) return;
+    if (std::any_of(w->tabs.begin(), w->tabs.end(),
+                    [](const Tab& tab) { return tab.closing; })) {
+        platform_.request_animation_frame(window);
+        return;
+    }
+    const double now = platform_.monotonic_seconds();
+    if (visual->second.new_tab_hover.active(now)) {
+        platform_.request_animation_frame(window);
+        return;
+    }
+    for (const auto& [_, tab] : visual->second.tabs) {
+        if (tab.bounds.active(now) || tab.hover.active(now)) {
+            platform_.request_animation_frame(window);
+            return;
+        }
+    }
+}
+
+void Shell::finish_close_tab(WindowId window, TabId tab) {
+    const WindowTabs* w = model_.window(window);
+    if (!w || !busy_windows_.insert(window).second) return;
+    const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+        [tab](const Tab& item) { return item.id == tab && item.closing; });
+    if (it == w->tabs.end()) {
+        busy_windows_.erase(window);
+        return;
+    }
+    const ContentId content = it->content;
+    (void)model_.close_tab(window, tab);
+    client_.tab_detached(window, tab, content);
+    client_.tab_closed(content);
+    if (auto visual = visuals_.find(window); visual != visuals_.end())
+        visual->second.tabs.erase(tab);
+    sync_visuals(window);
+    platform_.invalidate(window);
+    busy_windows_.erase(window);
+}
+
+void Shell::advance_animations(WindowId window) {
+    const WindowTabs* w = model_.window(window);
+    if (!w) return;
+    const double now = platform_.monotonic_seconds();
+    std::vector<TabId> finished;
+    const auto visual = visuals_.find(window);
+    if (visual != visuals_.end()) {
+        for (const Tab& tab : w->tabs) {
+            if (!tab.closing) continue;
+            const auto it = visual->second.tabs.find(tab.id);
+            if (it != visual->second.tabs.end() && !it->second.bounds.active(now))
+                finished.push_back(tab.id);
+        }
+    }
+    for (TabId tab : finished) finish_close_tab(window, tab);
+    if (!model_.window(window)) return;
+    platform_.invalidate(window);
+    schedule_animation(window);
+}
+
+void Shell::settle_drag(const Drag& completed) {
+    if (completed.phase != DragPhase::InStrip || !model_.window(completed.window)) return;
+    const StripLayout strip = layout(completed.window);
+    const WindowTabs* w = model_.window(completed.window);
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        if (w->tabs[i].id != completed.tab) continue;
+        const Point origin = platform_.client_origin(completed.window);
+        const Rect from = Layout::drag_visual(strip, i,
+            completed.current_screen.x - origin.x, completed.grab_tab_x,
+            platform_.scale(completed.window)).tab;
+        auto& bounds = visuals_[completed.window].tabs[completed.tab].bounds;
+        bounds.snap(from);
+        bounds.retarget(strip.tabs[i], platform_.monotonic_seconds());
+        schedule_animation(completed.window);
+        platform_.invalidate(completed.window);
+        return;
+    }
+}
+
 TabId Shell::tab_at(WindowId window, Point client) const {
     const auto* w = model_.window(window);
     if (!w) return 0;
     const auto strip = layout(window);
     for (std::size_t i = 0; i < strip.tabs.size(); ++i) {
-        const Rect r = strip.tabs[i];
+        if (w->tabs[i].closing) continue;
+        const Rect r = visual_tab_bounds(window, w->tabs[i].id, strip.tabs[i]);
         if (w->tabs[i].id == w->active && r.contains(client) &&
             tab_face(r, platform_.scale(window), true).contains(
                 static_cast<float>(client.x - r.x), static_cast<float>(client.y - r.y)))
             return w->active;
     }
     for (std::size_t i = strip.tabs.size(); i-- > 0;) {
-        const Rect r = strip.tabs[i];
+        if (w->tabs[i].closing) continue;
+        const Rect r = visual_tab_bounds(window, w->tabs[i].id, strip.tabs[i]);
         if (r.contains(client) && tab_face(r, platform_.scale(window), false).contains(
                 static_cast<float>(client.x - r.x), static_cast<float>(client.y - r.y)))
             return w->tabs[i].id;
@@ -433,11 +715,18 @@ bool Shell::caption_hit(WindowId window, Point client) const {
     const auto strip = layout(window);
     return client.y >= 0 && client.y < strip.height &&
            client.x < strip.caption_start &&
-           !strip.new_tab.contains(client) && tab_at(window, client) == 0;
+           !visual_new_tab_bounds(window, strip).contains(client) &&
+           tab_at(window, client) == 0;
 }
 
 void Shell::clear_hover(WindowId window) {
     if (hover_window_ != window) return;
+    const double now = platform_.monotonic_seconds();
+    auto& visual = visuals_[window];
+    if (auto it = visual.tabs.find(hover_tab_); it != visual.tabs.end())
+        it->second.hover.retarget(0.0f, now);
+    visual.new_tab_hover.retarget(0.0f, now);
+    schedule_animation(window);
     if (hover_tab_ || hover_close_ || hover_new_tab_ || hover_caption_ >= 0)
         platform_.invalidate(window);
     hover_window_ = 0;
@@ -460,13 +749,13 @@ void Shell::update_hover(WindowId window, Point client) {
             for (int i = 0; i < strip.caption_button_count; ++i) {
                 if (caption_button(strip, i, scale).contains(client)) caption = i;
             }
-        } else if (strip.new_tab.contains(client)) {
+        } else if (visual_new_tab_bounds(window, strip).contains(client)) {
             new_tab = true;
         } else if ((tab = tab_at(window, client))) {
             const auto* w = model_.window(window);
             for (std::size_t i = 0; i < w->tabs.size(); ++i) {
                 if (w->tabs[i].id != tab) continue;
-                const Rect r = strip.tabs[i];
+                const Rect r = visual_tab_bounds(window, tab, strip.tabs[i]);
                 if (client.x >= r.right() - static_cast<int>(37 * scale) &&
                     client.x < r.right() - static_cast<int>(13 * scale)) close = tab;
                 break;
@@ -475,12 +764,25 @@ void Shell::update_hover(WindowId window, Point client) {
     }
     if (hover_window_ == window && hover_tab_ == tab && hover_close_ == close &&
         hover_new_tab_ == new_tab && hover_caption_ == caption) return;
+    const TabId old_tab = hover_window_ == window ? hover_tab_ : 0;
+    const bool old_new_tab = hover_window_ == window && hover_new_tab_;
     if (hover_window_ && hover_window_ != window) clear_hover(hover_window_);
+    const double now = platform_.monotonic_seconds();
+    auto& visual = visuals_[window];
+    if (old_tab != tab) {
+        if (auto it = visual.tabs.find(old_tab); it != visual.tabs.end())
+            it->second.hover.retarget(0.0f, now);
+        if (auto it = visual.tabs.find(tab); it != visual.tabs.end())
+            it->second.hover.retarget(1.0f, now);
+    }
+    if (old_new_tab != new_tab)
+        visual.new_tab_hover.retarget(new_tab ? 1.0f : 0.0f, now);
     hover_window_ = window;
     hover_tab_ = tab;
     hover_close_ = close;
     hover_new_tab_ = new_tab;
     hover_caption_ = caption;
+    schedule_animation(window);
     platform_.invalidate(window);
 }
 
@@ -516,7 +818,7 @@ void Shell::handle_pointer(const Event& event) {
             }
             return;
         }
-        if (strip.new_tab.contains(event.client)) {
+        if (visual_new_tab_bounds(event.window, strip).contains(event.client)) {
             (void)new_tab(event.window);
             return;
         }
@@ -526,7 +828,7 @@ void Shell::handle_pointer(const Event& event) {
         const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
                                      [id](const Tab& tab) { return tab.id == id; });
         const std::size_t index = static_cast<std::size_t>(it - w->tabs.begin());
-        const Rect rect = strip.tabs[index];
+        const Rect rect = visual_tab_bounds(event.window, id, strip.tabs[index]);
         if (((id == w->active && rect.width >=
               static_cast<int>(detail::ChromeMetrics::min_active_width * platform_.scale(event.window))) ||
              rect.width >= static_cast<int>(detail::ChromeMetrics::close_hide_width *
@@ -549,6 +851,7 @@ void Shell::handle_pointer(const Event& event) {
     }
     if (event.type == EventType::PointerUp) {
         const bool was_dragging = drag_.phase == DragPhase::InStrip;
+        const Drag completed = drag_;
         if (drag_.phase == DragPhase::Idle && event.client.y >= strip.height) {
             client_.body_event(event, {0, strip.height, event.size.width,
                                        event.size.height - strip.height});
@@ -556,7 +859,7 @@ void Shell::handle_pointer(const Event& event) {
         if (drag_.phase != DragPhase::NativeWindow) {
             drag_ = {};
             platform_.release_pointer();
-            if (was_dragging) platform_.invalidate(event.window);
+            if (was_dragging) settle_drag(completed);
         }
         return;
     }
@@ -669,7 +972,7 @@ void Shell::cancel_drag() {
     drag_ = {};
     if (canceled.phase == DragPhase::InStrip && model_.window(canceled.window)) {
         (void)move_tab(canceled.window, canceled.tab, canceled.original_index);
-        platform_.invalidate(canceled.window);
+        settle_drag(canceled);
     }
     platform_.release_pointer();
 }
@@ -680,8 +983,10 @@ void Shell::paint(WindowId window) {
     const Size size = platform_.client_size(window);
     if (size.width <= 0 || size.height <= 0) return;
     const Size rendered = renderer_.info(window).surface_size;
-    if (rendered.width != size.width || rendered.height != size.height)
+    if (rendered.width != size.width || rendered.height != size.height) {
         renderer_.resize(window, size);
+        sync_visuals(window, 0, false);
+    }
     SkCanvas* canvas = renderer_.canvas(window);
     if (!canvas) return;
     const float scale = platform_.scale(window);
@@ -715,10 +1020,12 @@ void Shell::paint(WindowId window) {
 
     const auto paint_tab = [&](std::size_t i) {
         const Tab& tab = w->tabs[i];
-        const Rect r = dragging && i == dragged_index ? drag_visual.tab : strip.tabs[i];
-        const bool active = tab.id == w->active;
-        paint.setColor(active ? theme_.tab_active
-                              : tab.id == hover_tab_ ? theme_.tab_hover : theme_.tab_inactive);
+        const Rect r = dragging && i == dragged_index ? drag_visual.tab :
+            visual_tab_bounds(window, tab.id, strip.tabs[i]);
+        const bool active = tab.id == w->active && !tab.closing;
+        paint.setColor(active ? theme_.tab_active :
+            blend_color(theme_.tab_inactive, theme_.tab_hover,
+                        tab_hover_amount(window, tab.id)));
         canvas->save();
         canvas->translate(static_cast<float>(r.x), static_cast<float>(r.y));
         canvas->drawPath(tab_face(r, scale, active), paint);
@@ -749,12 +1056,14 @@ void Shell::paint(WindowId window) {
         }
     };
     for (std::size_t i = 0; i < w->tabs.size(); ++i) {
-        if (w->tabs[i].id != w->active && i != dragged_index) paint_tab(i);
+        if (w->tabs[i].id != w->active && !w->tabs[i].closing &&
+            i != dragged_index) paint_tab(i);
     }
     for (std::size_t i = 0; i + 1 < w->tabs.size(); ++i) {
         if (w->tabs[i].id == w->active || w->tabs[i + 1].id == w->active ||
+            w->tabs[i].closing || w->tabs[i + 1].closing ||
             i == dragged_index || i + 1 == dragged_index) continue;
-        const Rect r = strip.tabs[i];
+        const Rect r = visual_tab_bounds(window, w->tabs[i].id, strip.tabs[i]);
         paint.setColor(theme_.separator);
         canvas->drawRoundRect(SkRect::MakeXYWH(
                                   r.right() - (detail::ChromeMetrics::overlap +
@@ -767,10 +1076,13 @@ void Shell::paint(WindowId window) {
     for (std::size_t i = 0; i < w->tabs.size(); ++i) {
         if (w->tabs[i].id == w->active && i != dragged_index) paint_tab(i);
     }
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        if (w->tabs[i].closing) paint_tab(i);
+    }
     if (dragged_index < w->tabs.size()) paint_tab(dragged_index);
-    const Rect new_tab = dragging ? drag_visual.new_tab : strip.new_tab;
-    paint.setColor(hover_window_ == window && hover_new_tab_ ?
-                   theme_.new_tab_hover : theme_.new_tab);
+    const Rect new_tab = visual_new_tab_bounds(window, strip);
+    paint.setColor(blend_color(theme_.new_tab, theme_.new_tab_hover,
+                               new_tab_hover_amount(window)));
     canvas->drawRoundRect(skrect(new_tab), 14 * scale, 14 * scale, paint);
     text(*canvas, "+", new_tab.x + 7 * scale, new_tab.y + 21 * scale,
          20 * scale, theme_.text);
