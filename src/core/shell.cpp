@@ -83,8 +83,9 @@ Shell::~Shell() {
     platform_.set_event_handler({});
     platform_.set_caption_hit_handler({});
     for (WindowId id : model_.window_ids()) {
-        renderer_.detach(id);
-        platform_.destroy(id);
+        busy_windows_.insert(id);
+        destroy_window_contents(id);
+        busy_windows_.erase(id);
     }
 }
 
@@ -104,42 +105,128 @@ WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
         (void)model_.remove_window(id);
         return 0;
     }
+    client_.body_geometry_changed(id, body_bounds(id), platform_.scale(id));
+    if (!model_.window(id)) return 0;
     if (with_initial_tab) (void)new_tab(id);
+    if (!model_.window(id)) return 0;
     if (visible) platform_.show(id);
     platform_.invalidate(id);
     return id;
 }
 
 TabId Shell::new_tab(WindowId window) {
-    if (!model_.window(window)) return 0;
+    const WindowTabs* w = model_.window(window);
+    if (!w || !busy_windows_.insert(window).second) return 0;
+    const TabId previous = w->active;
     NewTab created = client_.create_tab();
     const TabId id = model_.add_tab(window, created.content, std::move(created.title));
     if (id) {
         (void)model_.select_tab(window, id);
+        client_.tab_attached(window, id, created.content);
+        if (previous != id) client_.active_tab_changed(window, previous, id);
         platform_.invalidate(window);
+    } else {
+        client_.tab_closed(created.content);
     }
+    busy_windows_.erase(window);
     return id;
 }
 
 bool Shell::close_tab(WindowId window, TabId tab) {
     const WindowTabs* w = model_.window(window);
-    if (!w) return false;
+    if (!w || !busy_windows_.insert(window).second) return false;
     const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
                                  [tab](const Tab& item) { return item.id == tab; });
-    if (it == w->tabs.end()) return false;
+    if (it == w->tabs.end()) {
+        busy_windows_.erase(window);
+        return false;
+    }
     const ContentId content = it->content;
-    if (!model_.close_tab(window, tab)) return false;
+    const TabId previous = w->active;
+    const bool last = w->tabs.size() == 1;
+    if (!client_.allow_close_tab(window, tab, content) ||
+        (last && !client_.allow_close_window(window)) ||
+        !model_.close_tab(window, tab)) {
+        busy_windows_.erase(window);
+        return false;
+    }
+    const TabId current = model_.window(window)->active;
+    if (previous != current) client_.active_tab_changed(window, previous, current);
+    client_.tab_detached(window, tab, content);
     client_.tab_closed(content);
     if (const WindowTabs* remaining = model_.window(window)) {
-        if (remaining->tabs.empty()) close_window(window);
+        if (remaining->tabs.empty()) {
+            if (drag_.window == window) {
+                if (drag_.phase != DragPhase::NativeWindow) platform_.release_pointer();
+                drag_ = {};
+            }
+            clear_hover(window);
+            request_destroy(window);
+        }
         else platform_.invalidate(window);
     }
+    busy_windows_.erase(window);
     return true;
 }
 
 bool Shell::select_tab(WindowId window, TabId tab) {
-    if (!model_.select_tab(window, tab)) return false;
+    const WindowTabs* w = model_.window(window);
+    if (!w || !busy_windows_.insert(window).second) return false;
+    const TabId previous = w->active;
+    if (!model_.select_tab(window, tab)) {
+        busy_windows_.erase(window);
+        return false;
+    }
+    if (previous != tab) client_.active_tab_changed(window, previous, tab);
     platform_.invalidate(window);
+    busy_windows_.erase(window);
+    return true;
+}
+
+bool Shell::move_tab(WindowId window, TabId tab, std::size_t index) {
+    if (busy_windows_.contains(window) || !model_.move_tab(window, tab, index)) return false;
+    platform_.invalidate(window);
+    return true;
+}
+
+bool Shell::transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t index) {
+    if (from == to) return move_tab(from, tab, index);
+    const WindowTabs* source = model_.window(from);
+    const WindowTabs* target = model_.window(to);
+    if (!source || !target || busy_windows_.contains(from) || busy_windows_.contains(to))
+        return false;
+    const auto it = std::find_if(source->tabs.begin(), source->tabs.end(),
+                                 [tab](const Tab& item) { return item.id == tab; });
+    if (it == source->tabs.end()) return false;
+    const ContentId content = it->content;
+    const TabId source_active = source->active;
+    const TabId target_active = target->active;
+    busy_windows_.insert(from);
+    busy_windows_.insert(to);
+    if (!model_.transfer_tab(from, to, tab, index)) {
+        busy_windows_.erase(from);
+        busy_windows_.erase(to);
+        return false;
+    }
+    client_.tab_detached(from, tab, content);
+    client_.tab_attached(to, tab, content);
+    const TabId source_current = model_.window(from)->active;
+    if (source_active != source_current)
+        client_.active_tab_changed(from, source_active, source_current);
+    if (target_active != tab) client_.active_tab_changed(to, target_active, tab);
+    platform_.invalidate(to);
+    if (model_.window(from)->tabs.empty()) {
+        if (drag_.window == from) {
+            if (drag_.phase != DragPhase::NativeWindow) platform_.release_pointer();
+            drag_ = {};
+        }
+        clear_hover(from);
+        request_destroy(from);
+    } else {
+        platform_.invalidate(from);
+    }
+    busy_windows_.erase(from);
+    busy_windows_.erase(to);
     return true;
 }
 
@@ -152,14 +239,37 @@ bool Shell::update_tab(WindowId window, TabId tab, std::string title,
 
 void Shell::close_window(WindowId window) {
     const WindowTabs* w = model_.window(window);
+    if (!w || !busy_windows_.insert(window).second) return;
+    if (!client_.allow_close_window(window)) {
+        busy_windows_.erase(window);
+        return;
+    }
+    for (const Tab& tab : w->tabs) {
+        if (!client_.allow_close_tab(window, tab.id, tab.content)) {
+            busy_windows_.erase(window);
+            return;
+        }
+    }
+    destroy_window_contents(window);
+    busy_windows_.erase(window);
+}
+
+void Shell::destroy_window_contents(WindowId window) {
+    const WindowTabs* w = model_.window(window);
     if (!w) return;
-    std::vector<ContentId> content;
-    content.reserve(w->tabs.size());
-    for (const Tab& tab : w->tabs) content.push_back(tab.content);
-    if (drag_.window == window) drag_ = {};
+    const TabId active = w->active;
+    const std::vector<Tab> tabs = w->tabs;
+    if (drag_.window == window) {
+        if (drag_.phase != DragPhase::NativeWindow) platform_.release_pointer();
+        drag_ = {};
+    }
     clear_hover(window);
+    if (active) client_.active_tab_changed(window, active, 0);
+    for (const Tab& tab : tabs) {
+        client_.tab_detached(window, tab.id, tab.content);
+        client_.tab_closed(tab.content);
+    }
     request_destroy(window);
-    for (ContentId id : content) client_.tab_closed(id);
 }
 
 void Shell::request_destroy(WindowId window) {
@@ -190,7 +300,9 @@ void Shell::handle_event(const Event& event) {
     case EventType::Paint: paint(event.window); break;
     case EventType::Resized:
         renderer_.resize(event.window, event.size);
-        platform_.invalidate(event.window);
+        client_.body_geometry_changed(event.window, body_bounds(event.window),
+                                      platform_.scale(event.window));
+        if (model_.window(event.window)) platform_.invalidate(event.window);
         break;
     case EventType::PointerDown:
     case EventType::PointerMove:
@@ -243,6 +355,12 @@ StripLayout Shell::layout(WindowId window) const {
     const auto* w = model_.window(window);
     return Layout::tab_strip(platform_.client_size(window).width, w ? w->tabs.size() : 0,
                              platform_.scale(window));
+}
+
+Rect Shell::body_bounds(WindowId window) const {
+    const Size size = platform_.client_size(window);
+    const int top = layout(window).height;
+    return {0, top, size.width, std::max(0, size.height - top)};
 }
 
 TabId Shell::tab_at(WindowId window, Point client) const {
@@ -422,8 +540,7 @@ void Shell::handle_pointer(const Event& event) {
     if (it == w->tabs.end()) return;
     const std::size_t from = static_cast<std::size_t>(it - w->tabs.begin());
     const std::size_t to = Layout::insertion_index(strip, event.client.x, from);
-    if (from != to && model_.move_tab(event.window, drag_.tab, to))
-        platform_.invalidate(event.window);
+    if (from != to) (void)move_tab(event.window, drag_.tab, to);
 }
 
 void Shell::start_native_drag(WindowId window, Point screen) {
@@ -440,11 +557,10 @@ void Shell::start_native_drag(WindowId window, Point screen) {
                           size.width, size.height};
         const WindowId torn = open_window(bounds, false, false);
         if (!torn) return;
-        if (!model_.transfer_tab(window, torn, drag_.tab, 0)) {
+        if (!transfer_tab(window, torn, drag_.tab, 0)) {
             request_destroy(torn);
             return;
         }
-        platform_.invalidate(window);
         drag_.window = torn;
         drag_.phase = DragPhase::NativeWindow;
         platform_.invalidate(torn);
@@ -479,11 +595,7 @@ void Shell::finish_native_drag() {
         const Point origin = platform_.client_origin(target);
         const int x = drag_.current_screen.x - origin.x;
         const std::size_t index = Layout::insertion_index(target_layout, x, target_layout.tabs.size());
-        if (model_.transfer_tab(source, target, drag_.tab, index)) {
-            platform_.invalidate(target);
-            if (model_.window(source)->tabs.empty()) request_destroy(source);
-            else platform_.invalidate(source);
-        }
+        (void)transfer_tab(source, target, drag_.tab, index);
     }
     drag_ = {};
 }

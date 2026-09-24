@@ -7,7 +7,9 @@
 #include "tabengine/theme.h"
 
 #include <memory>
+#include <cstddef>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace tabengine {
@@ -23,6 +25,16 @@ class IClient {
 public:
     virtual ~IClient() = default;
     [[nodiscard]] virtual NewTab create_tab() = 0;
+    // Returning false leaves the model and content unchanged. A host can show
+    // a confirmation UI and retry the operation after the user accepts it.
+    [[nodiscard]] virtual bool allow_close_tab(WindowId, TabId, ContentId) { return true; }
+    [[nodiscard]] virtual bool allow_close_window(WindowId) { return true; }
+    // The content instance remains application-owned through every callback.
+    // A transfer detaches and reattaches the same content without closing it.
+    virtual void tab_attached(WindowId, TabId, ContentId) {}
+    virtual void tab_detached(WindowId, TabId, ContentId) {}
+    virtual void active_tab_changed(WindowId, TabId, TabId) {}
+    virtual void body_geometry_changed(WindowId, Rect, float) {}
     virtual void tab_closed(ContentId content) = 0;
     virtual void paint_body(WindowId window, TabId active, SkCanvas& canvas, Rect body) = 0;
     virtual void body_event(const Event& event, Rect body) = 0;
@@ -42,6 +54,8 @@ public:
     [[nodiscard]] TabId new_tab(WindowId window);
     [[nodiscard]] bool close_tab(WindowId window, TabId tab);
     [[nodiscard]] bool select_tab(WindowId window, TabId tab);
+    [[nodiscard]] bool move_tab(WindowId window, TabId tab, std::size_t index);
+    [[nodiscard]] bool transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t index);
     [[nodiscard]] bool update_tab(WindowId window, TabId tab, std::string title,
                                   bool loading = false, bool attention = false);
     void close_window(WindowId window);
@@ -69,6 +83,8 @@ private:
     void paint(WindowId window);
     void request_destroy(WindowId window);
     void flush_destroy();
+    void destroy_window_contents(WindowId window);
+    [[nodiscard]] Rect body_bounds(WindowId window) const;
     [[nodiscard]] StripLayout layout(WindowId window) const;
     [[nodiscard]] TabId tab_at(WindowId window, Point client) const;
     [[nodiscard]] bool over_strip(WindowId window, Point screen) const;
@@ -88,6 +104,7 @@ private:
     int hover_caption_ = -1;
     Drag drag_;
     std::vector<WindowId> pending_destroy_;
+    std::unordered_set<WindowId> busy_windows_;
     int dispatch_depth_ = 0;
 };
 

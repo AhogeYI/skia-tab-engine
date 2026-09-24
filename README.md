@@ -7,6 +7,7 @@ This repository is being developed independently. It does not implement an addre
 ## Current capabilities
 
 - Ordered tabs, active selection, metadata updates, and transfer between windows while preserving tab and content IDs.
+- Content attach/detach and active-tab notifications, body geometry updates, and vetoable tab/window closure. Transfers keep the application-owned content alive; final closure reports it once.
 - Width adapting tab strip, selection, close and new tab controls, in strip reorder, and a Win32 native window move loop for tear off and attach.
 - Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a visual workbench application.
 - DirectWrite-backed Skia UI and caption typefaces so tab titles and controls render in the Windows build.
@@ -37,6 +38,8 @@ ctest --test-dir build/windows -C Debug --output-on-failure
 
 The Skia package must contain `include/` and `lib/skia.lib`. The package used for the initial Windows build is a local MSVC Debug package; TabEngine does not import any external product code or CMake configuration. The demo executable is `build/windows/Debug/tabengine_win32_demo.exe` for the command above.
 
+For a library-only Windows build, set `TABENGINE_BUILD_SKIA=ON` and `TABENGINE_BUILD_WIN32_DEMO=OFF`. This builds `tabengine_skia` and its tests without compiling the workbench executable.
+
 When working in the the development workspace workspace, select **TabEngine (vs-debug)** in VS Code's Run and Debug menu and press F5. Its pre-launch task configures and builds the demo in `tab-engine/build/vs-debug` using the workspace's Skia package.
 
 ## F5 workbench acceptance
@@ -49,7 +52,7 @@ Try tab selection and closing, the plus button, horizontal reordering, tearing a
 
 ## Embedding boundary
 
-`Model` owns tab presentation records and window membership. The application owns content identified by `ContentId`. `IClient` creates that ID, receives close notifications, and controls body rendering and input. `IPlatform` owns native windows, input and move loops. `IRenderer` supplies a canvas and presents each window. The controller in `Shell` connects these contracts.
+`Model` owns tab presentation records and window membership. The application owns content identified by `ContentId`. `IClient` creates content, receives attach/detach/activation and body geometry callbacks, can veto tab/window closure, and controls body rendering and input. The public `Shell::move_tab` and `Shell::transfer_tab` operations route model changes through those callbacks. A transfer never calls `tab_closed`; a final close does. Reentrant structural operations on a window are rejected while a tab or window mutation callback is running. `IPlatform` owns native windows, input and move loops. `IRenderer` supplies a canvas and presents each window. The controller in `Shell` connects these contracts.
 
 The Windows drag path follows the responsibilities in Chromium's [TabStripModel](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/ui/tabs/tab_strip_model.h), [Views Widget](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/ui/views/overview.md), and [TabDragController](https://chromium.googlesource.com/chromium/src/+/b39ab7bc4ae0db831a930d373264e5edf8205fdc/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.h): separate model, view, native host, and drag session. It is an original implementation with no Chromium build dependency.
 
