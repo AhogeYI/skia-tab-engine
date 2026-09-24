@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+
 int main() {
     auto text_surface = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(240, 80));
     if (!text_surface) return 1;
@@ -40,11 +41,16 @@ int main() {
     auto renderer = tabengine::make_skia_windows_renderer();
     constexpr tabengine::WindowId id = 1;
     if (!renderer->attach(id, hwnd, {320, 200})) return 5;
+    const auto initial = renderer->info(id);
+    if (initial.surface_size.width != 320) return 8;
     SkCanvas* canvas = renderer->canvas(id);
     if (!canvas) return 6;
     canvas->clear(SK_ColorRED);
     renderer->present(id, hwnd);
     renderer->resize(id, {480, 300});
+    if (renderer->info(id).surface_size.width != 480 ||
+        renderer->info(id).surface_size.height != 300) return 9;
+    if (renderer->info(id).backend != initial.backend) return 10;
     canvas = renderer->canvas(id);
     if (!canvas) return 7;
     canvas->clear(SK_ColorBLUE);

@@ -65,6 +65,10 @@ public:
         attach_target_ = target;
         attach_point_ = point;
     }
+    void resize_without_event(tabengine::WindowId id, tabengine::Size size) {
+        windows_.at(id).width = size.width;
+        windows_.at(id).height = size.height;
+    }
     bool ended() const { return ended_; }
 
 private:
@@ -106,8 +110,8 @@ int main() {
     const auto target = shell.open_window({500, 100, 900, 600});
     platform.attach_to(target, {550, 120});
 
-    platform.emit({tabengine::EventType::PointerDown, source, {30, 20}, {130, 120}});
-    platform.emit({tabengine::EventType::PointerMove, source, {40, 100}, {140, 200}});
+    platform.emit({tabengine::EventType::PointerDown, source, {70, 20}, {170, 120}});
+    platform.emit({tabengine::EventType::PointerMove, source, {70, 100}, {170, 200}});
 
     assert(platform.ended());
     assert(shell.model().window_ids().size() == 2);
@@ -121,5 +125,9 @@ int main() {
     }
     assert(preserved);
     assert(client.closed().empty());
+    platform.resize_without_event(target, {640, 480});
+    platform.emit({tabengine::EventType::Paint, target});
+    assert(renderer->info(target).surface_size.width == 640);
+    assert(renderer->info(target).surface_size.height == 480);
     return 0;
 }

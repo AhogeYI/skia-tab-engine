@@ -4,6 +4,7 @@
 #include "tabengine/model.h"
 #include "tabengine/platform.h"
 #include "tabengine/render.h"
+#include "tabengine/theme.h"
 
 #include <memory>
 #include <string>
@@ -25,6 +26,8 @@ public:
     virtual void tab_closed(ContentId content) = 0;
     virtual void paint_body(WindowId window, TabId active, SkCanvas& canvas, Rect body) = 0;
     virtual void body_event(const Event& event, Rect body) = 0;
+    virtual void paint_leading(WindowId, SkCanvas&, Rect) {}
+    virtual void paint_tab_icon(WindowId, TabId, SkCanvas&, Rect) {}
 };
 
 class Shell {
@@ -44,6 +47,7 @@ public:
     void close_window(WindowId window);
     void on_event(const Event& event);
     [[nodiscard]] const Model& model() const { return model_; }
+    void set_theme(Theme theme);
 
 private:
     enum class DragPhase { Idle, Pressed, InStrip, NativeWindow };
@@ -69,11 +73,19 @@ private:
     [[nodiscard]] TabId tab_at(WindowId window, Point client) const;
     [[nodiscard]] bool over_strip(WindowId window, Point screen) const;
     [[nodiscard]] bool caption_hit(WindowId window, Point client) const;
+    void update_hover(WindowId window, Point client);
+    void clear_hover(WindowId window);
 
     IPlatform& platform_;
     IRenderer& renderer_;
     IClient& client_;
     Model model_;
+    Theme theme_;
+    WindowId hover_window_ = 0;
+    TabId hover_tab_ = 0;
+    TabId hover_close_ = 0;
+    bool hover_new_tab_ = false;
+    int hover_caption_ = -1;
     Drag drag_;
     std::vector<WindowId> pending_destroy_;
     int dispatch_depth_ = 0;

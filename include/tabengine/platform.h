@@ -8,7 +8,7 @@
 namespace tabengine {
 
 enum class EventType {
-    Paint, Resized, PointerDown, PointerMove, PointerUp, CaptureLost,
+    Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
     KeyDown, CloseRequested, Moving, NativeMoveEnded
 };
 

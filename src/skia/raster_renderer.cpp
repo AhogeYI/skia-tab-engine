@@ -56,6 +56,12 @@ public:
         ReleaseDC(hwnd, dc);
     }
 
+    RenderInfo info(WindowId id) const override {
+        auto it = surfaces_.find(id);
+        if (it == surfaces_.end()) return {};
+        return {RenderBackend::Raster, {it->second->width(), it->second->height()}};
+    }
+
 private:
     std::unordered_map<WindowId, sk_sp<SkSurface>> surfaces_;
 };
@@ -67,4 +73,3 @@ std::unique_ptr<IRenderer> make_skia_raster_renderer() {
 }
 
 } // namespace tabengine
-

@@ -210,6 +210,7 @@ private:
         HWND hwnd = nullptr;
         bool in_move_loop = false;
         bool skip_first_moving = false;
+        bool tracking_mouse = false;
     };
 
     HWND handle(WindowId id) const {
@@ -286,6 +287,10 @@ private:
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE:
         case WM_LBUTTONUP: {
+            if (message == WM_MOUSEMOVE && !native->tracking_mouse) {
+                TRACKMOUSEEVENT track{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
+                native->tracking_mouse = TrackMouseEvent(&track) != FALSE;
+            }
             POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ClientToScreen(hwnd, &screen);
             const EventType type = message == WM_LBUTTONDOWN ? EventType::PointerDown
@@ -296,6 +301,10 @@ private:
                                 {screen.x, screen.y}});
             return 0;
         }
+        case WM_MOUSELEAVE:
+            native->tracking_mouse = false;
+            self.emit(*native, {EventType::PointerLeave});
+            return 0;
         case WM_CAPTURECHANGED:
             self.emit(*native, {EventType::CaptureLost});
             return 0;

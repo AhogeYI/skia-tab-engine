@@ -122,10 +122,18 @@ public:
         if (it == windows_.end() || size.width <= 0 || size.height <= 0) return;
         WindowSurface& window = *it->second;
         if (window.size.width == size.width && window.size.height == size.height) return;
-        if (!release_frames(window)) return;
-        if (FAILED(window.swapchain->ResizeBuffers(kFrameCount,
-                static_cast<UINT>(size.width), static_cast<UINT>(size.height), kFormat, 0)) ||
-            !wrap(window, size)) device_lost_ = true;
+        if (!release_frames(window)) {
+            device_lost_ = true;
+            return;
+        }
+        HRESULT hr = window.swapchain->ResizeBuffers(kFrameCount,
+                static_cast<UINT>(size.width), static_cast<UINT>(size.height), kFormat, 0);
+        if (FAILED(hr)) {
+            context_->freeGpuResources();
+            hr = window.swapchain->ResizeBuffers(kFrameCount,
+                    static_cast<UINT>(size.width), static_cast<UINT>(size.height), kFormat, 0);
+        }
+        if (FAILED(hr) || !wrap(window, size)) device_lost_ = true;
     }
 
     void detach(WindowId id) override {
@@ -170,6 +178,12 @@ public:
 
     [[nodiscard]] bool device_lost() const { return device_lost_; }
 
+    RenderInfo info(WindowId id) const override {
+        auto it = windows_.find(id);
+        if (it == windows_.end()) return {};
+        return {RenderBackend::D3D12, it->second->size};
+    }
+
 private:
     bool wrap(WindowSurface& window, Size size) {
         GrD3DTextureResourceInfo resource_info(nullptr, nullptr, D3D12_RESOURCE_STATE_PRESENT,
@@ -190,10 +204,9 @@ private:
     }
 
     bool release_frames(WindowSurface& window) {
-        if (window.acquired) {
-            context_->flushAndSubmit(GrSyncCpu::kYes);
-            window.acquired = false;
-        }
+        context_->flush();
+        context_->submit(GrSyncCpu::kYes);
+        window.acquired = false;
         bool waited = true;
         for (Frame& frame : window.frames) {
             waited = window.wait_for(frame.fence_value) && waited;
@@ -232,7 +245,10 @@ public:
     void resize(WindowId id, Size size) override {
         if (auto it = backends_.find(id); it != backends_.end()) {
             it->second.size = size;
-            if (it->second.gpu) gpu_->resize(id, size);
+            if (it->second.gpu) {
+                gpu_->resize(id, size);
+                if (gpu_->device_lost()) (void)fall_back(id, it->second);
+            }
             else raster_->resize(id, size);
         }
     }
@@ -251,11 +267,8 @@ public:
         SkCanvas* gpu_canvas = nullptr;
         if (it->second.gpu && !gpu_->device_lost()) gpu_canvas = gpu_->canvas(id);
         if (gpu_canvas) return gpu_canvas;
-        if (it->second.gpu && gpu_->device_lost()) {
-            gpu_->detach(id);
-            if (!raster_->attach(id, it->second.native_handle, it->second.size)) return nullptr;
-            it->second.gpu = false;
-        }
+        if (it->second.gpu && gpu_->device_lost() && !fall_back(id, it->second))
+            return nullptr;
         return it->second.gpu ? nullptr : raster_->canvas(id);
     }
 
@@ -270,12 +283,24 @@ public:
         else raster_->present(id, native_handle);
     }
 
+    RenderInfo info(WindowId id) const override {
+        auto it = backends_.find(id);
+        if (it == backends_.end()) return {};
+        return it->second.gpu ? gpu_->info(id) : raster_->info(id);
+    }
+
 private:
     struct Backend {
         bool gpu = false;
         void* native_handle = nullptr;
         Size size{};
     };
+    bool fall_back(WindowId id, Backend& backend) {
+        gpu_->detach(id);
+        if (!raster_->attach(id, backend.native_handle, backend.size)) return false;
+        backend.gpu = false;
+        return true;
+    }
     std::unique_ptr<D3D12Renderer> gpu_;
     std::unique_ptr<IRenderer> raster_;
     std::unordered_map<WindowId, Backend> backends_;

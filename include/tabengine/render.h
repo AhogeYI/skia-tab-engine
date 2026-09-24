@@ -8,6 +8,13 @@ class SkCanvas;
 
 namespace tabengine {
 
+enum class RenderBackend { None, Raster, D3D12 };
+
+struct RenderInfo {
+    RenderBackend backend = RenderBackend::None;
+    Size surface_size{};
+};
+
 class IRenderer {
 public:
     virtual ~IRenderer() = default;
@@ -16,6 +23,7 @@ public:
     virtual void detach(WindowId id) = 0;
     [[nodiscard]] virtual SkCanvas* canvas(WindowId id) = 0;
     virtual void present(WindowId id, void* native_handle) = 0;
+    [[nodiscard]] virtual RenderInfo info(WindowId id) const = 0;
 };
 
 // Windows reference renderer. All artwork is drawn by Skia; this backend

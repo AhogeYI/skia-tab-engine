@@ -4,6 +4,7 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkRect.h"
+#include "include/core/SkRRect.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +37,11 @@ Shell::~Shell() {
         renderer_.detach(id);
         platform_.destroy(id);
     }
+}
+
+void Shell::set_theme(Theme theme) {
+    theme_ = theme;
+    for (WindowId id : model_.window_ids()) platform_.invalidate(id);
 }
 
 WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
@@ -102,6 +108,7 @@ void Shell::close_window(WindowId window) {
     content.reserve(w->tabs.size());
     for (const Tab& tab : w->tabs) content.push_back(tab.content);
     if (drag_.window == window) drag_ = {};
+    clear_hover(window);
     request_destroy(window);
     for (ContentId id : content) client_.tab_closed(id);
 }
@@ -139,6 +146,7 @@ void Shell::handle_event(const Event& event) {
     case EventType::PointerDown:
     case EventType::PointerMove:
     case EventType::PointerUp:
+    case EventType::PointerLeave:
     case EventType::CaptureLost:
         handle_pointer(event);
         break;
@@ -161,6 +169,9 @@ TabId Shell::tab_at(WindowId window, Point client) const {
     const auto* w = model_.window(window);
     if (!w) return 0;
     const auto strip = layout(window);
+    for (std::size_t i = 0; i < strip.tabs.size(); ++i) {
+        if (w->tabs[i].id == w->active && strip.tabs[i].contains(client)) return w->active;
+    }
     for (std::size_t i = strip.tabs.size(); i-- > 0;) {
         if (strip.tabs[i].contains(client)) return w->tabs[i].id;
     }
@@ -181,12 +192,65 @@ bool Shell::caption_hit(WindowId window, Point client) const {
     const auto strip = layout(window);
     const int width = platform_.client_size(window).width;
     return client.y >= 0 && client.y < strip.height &&
-           client.x < width - static_cast<int>(120 * platform_.scale(window)) &&
+           client.x < width - static_cast<int>(135 * platform_.scale(window)) &&
            !strip.new_tab.contains(client) && tab_at(window, client) == 0;
 }
 
+void Shell::clear_hover(WindowId window) {
+    if (hover_window_ != window) return;
+    if (hover_tab_ || hover_close_ || hover_new_tab_ || hover_caption_ >= 0)
+        platform_.invalidate(window);
+    hover_window_ = 0;
+    hover_tab_ = 0;
+    hover_close_ = 0;
+    hover_new_tab_ = false;
+    hover_caption_ = -1;
+}
+
+void Shell::update_hover(WindowId window, Point client) {
+    const auto strip = layout(window);
+    const float scale = platform_.scale(window);
+    const int caption_start = platform_.client_size(window).width -
+                              static_cast<int>(135 * scale);
+    TabId tab = 0;
+    TabId close = 0;
+    bool new_tab = false;
+    int caption = -1;
+    if (client.y >= 0 && client.y < strip.height) {
+        if (client.x >= caption_start) {
+            caption = std::clamp(static_cast<int>((client.x - caption_start) /
+                                  std::max(1, static_cast<int>(45 * scale))), 0, 2);
+        } else if (strip.new_tab.contains(client)) {
+            new_tab = true;
+        } else if ((tab = tab_at(window, client))) {
+            const auto* w = model_.window(window);
+            for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+                if (w->tabs[i].id != tab) continue;
+                const Rect r = strip.tabs[i];
+                if (client.x >= r.right() - static_cast<int>(37 * scale) &&
+                    client.x < r.right() - static_cast<int>(13 * scale)) close = tab;
+                break;
+            }
+        }
+    }
+    if (hover_window_ == window && hover_tab_ == tab && hover_close_ == close &&
+        hover_new_tab_ == new_tab && hover_caption_ == caption) return;
+    if (hover_window_ && hover_window_ != window) clear_hover(hover_window_);
+    hover_window_ = window;
+    hover_tab_ = tab;
+    hover_close_ = close;
+    hover_new_tab_ = new_tab;
+    hover_caption_ = caption;
+    platform_.invalidate(window);
+}
+
 void Shell::handle_pointer(const Event& event) {
+    if (event.type == EventType::PointerLeave) {
+        clear_hover(event.window);
+        return;
+    }
     const auto strip = layout(event.window);
+    if (event.type == EventType::PointerMove) update_hover(event.window, event.client);
     if (event.type == EventType::PointerDown) {
         if (event.client.y >= strip.height) {
             client_.body_event(event, {0, strip.height, event.size.width,
@@ -194,9 +258,9 @@ void Shell::handle_pointer(const Event& event) {
             return;
         }
         const int caption_start = platform_.client_size(event.window).width -
-                                  static_cast<int>(120 * platform_.scale(event.window));
+                                  static_cast<int>(135 * platform_.scale(event.window));
         if (event.client.x >= caption_start) {
-            const int button_width = static_cast<int>(40 * platform_.scale(event.window));
+            const int button_width = static_cast<int>(45 * platform_.scale(event.window));
             const int button = (event.client.x - caption_start) / std::max(1, button_width);
             if (button == 0) platform_.minimize(event.window);
             else if (button == 1) platform_.toggle_maximize(event.window);
@@ -214,7 +278,10 @@ void Shell::handle_pointer(const Event& event) {
                                      [id](const Tab& tab) { return tab.id == id; });
         const std::size_t index = static_cast<std::size_t>(it - w->tabs.begin());
         const Rect rect = strip.tabs[index];
-        if (event.client.x >= rect.right() - static_cast<int>(23 * platform_.scale(event.window))) {
+        if ((id == w->active || rect.width >=
+             static_cast<int>(100 * platform_.scale(event.window))) &&
+            event.client.x >= rect.right() - static_cast<int>(37 * platform_.scale(event.window)) &&
+            event.client.x < rect.right() - static_cast<int>(13 * platform_.scale(event.window))) {
             (void)close_tab(event.window, id);
             return;
         }
@@ -332,41 +399,100 @@ void Shell::finish_native_drag() {
 }
 
 void Shell::paint(WindowId window) {
-    SkCanvas* canvas = renderer_.canvas(window);
     const auto* w = model_.window(window);
-    if (!canvas || !w) return;
+    if (!w) return;
     const Size size = platform_.client_size(window);
+    if (size.width <= 0 || size.height <= 0) return;
+    const Size rendered = renderer_.info(window).surface_size;
+    if (rendered.width != size.width || rendered.height != size.height)
+        renderer_.resize(window, size);
+    SkCanvas* canvas = renderer_.canvas(window);
+    if (!canvas) return;
     const float scale = platform_.scale(window);
     const StripLayout strip = layout(window);
-    canvas->clear(SK_ColorWHITE);
+    const int caption_width = static_cast<int>(135 * scale);
+    const int caption_start = std::max(0, size.width - caption_width);
+    canvas->clear(theme_.body);
     SkPaint paint;
     paint.setAntiAlias(true);
-    paint.setColor(SkColorSetRGB(38, 43, 51));
+    paint.setColor(theme_.strip);
     canvas->drawRect(SkRect::MakeXYWH(0, 0, static_cast<float>(size.width),
                                      static_cast<float>(strip.height)), paint);
-    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+    canvas->save();
+    canvas->clipRect(SkRect::MakeLTRB(0, 0, static_cast<float>(caption_start),
+                                     static_cast<float>(strip.height)));
+    client_.paint_leading(window, *canvas,
+                          {0, 0, static_cast<int>(40 * scale), strip.height});
+
+    const auto paint_tab = [&](std::size_t i) {
         const Tab& tab = w->tabs[i];
         const Rect r = strip.tabs[i];
-        paint.setColor(tab.id == w->active ? SkColorSetRGB(249, 250, 252)
-                                          : SkColorSetRGB(75, 81, 91));
-        canvas->drawRoundRect(skrect(r), 7.0f * scale, 7.0f * scale, paint);
+        const bool active = tab.id == w->active;
+        paint.setColor(active ? theme_.tab_active
+                              : tab.id == hover_tab_ ? theme_.tab_hover : theme_.tab_inactive);
+        canvas->drawRoundRect(skrect(r), 10.0f * scale, 10.0f * scale, paint);
+        if (active) {
+            canvas->drawRect(SkRect::MakeLTRB(static_cast<float>(r.x + 10 * scale),
+                                              static_cast<float>(r.bottom() - 11 * scale),
+                                              static_cast<float>(r.right() - 10 * scale),
+                                              static_cast<float>(r.bottom())), paint);
+        }
+        const int icon_size = static_cast<int>(16 * scale);
+        const Rect icon{r.x + static_cast<int>(20 * scale),
+                        r.y + (r.height - icon_size) / 2, icon_size, icon_size};
+        client_.paint_tab_icon(window, tab.id, *canvas, icon);
         canvas->save();
-        canvas->clipRect(SkRect::MakeXYWH(static_cast<float>(r.x + 12 * scale),
-                                          static_cast<float>(r.y),
-                                          static_cast<float>(r.width - 39 * scale),
-                                          static_cast<float>(r.height)));
-        text(*canvas, tab.title, r.x + 12 * scale, r.y + 23 * scale, 13 * scale,
-             tab.id == w->active ? SkColorSetRGB(31, 37, 45) : SK_ColorWHITE);
+        const float title_x = r.x + 43 * scale;
+        canvas->clipRect(SkRect::MakeLTRB(title_x, static_cast<float>(r.y),
+                                          static_cast<float>(std::max(r.x, r.right() -
+                                              static_cast<int>(39 * scale))),
+                                          static_cast<float>(r.bottom())));
+        text(*canvas, tab.title, title_x, r.y + 23 * scale, 12 * scale,
+             active ? theme_.text : theme_.text_muted);
         canvas->restore();
-        text(*canvas, "x", r.right() - 18 * scale, r.y + 23 * scale, 14 * scale,
-             tab.id == w->active ? SkColorSetRGB(70, 76, 84) : SK_ColorWHITE);
+        if (active || r.width >= static_cast<int>(100 * scale)) {
+            const float cx = r.right() - 25 * scale;
+            const float cy = r.y + r.height * 0.5f;
+            if (hover_window_ == window && hover_close_ == tab.id) {
+                paint.setColor(theme_.tab_hover);
+                canvas->drawCircle(cx, cy, 11 * scale, paint);
+            }
+            paint_caption_symbol(*canvas, "\xEE\xA2\xBB", cx, cy, 10 * scale,
+                                 active ? theme_.text_muted : theme_.text);
+        }
+    };
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        if (w->tabs[i].id != w->active) paint_tab(i);
     }
-    text(*canvas, "+", strip.new_tab.x + 6 * scale, strip.new_tab.y + 22 * scale,
-         22 * scale, SK_ColorWHITE);
-    const int caption_start = size.width - static_cast<int>(120 * scale);
-    text(*canvas, "_", caption_start + 16 * scale, 23 * scale, 16 * scale, SK_ColorWHITE);
-    text(*canvas, "[]", caption_start + 52 * scale, 23 * scale, 13 * scale, SK_ColorWHITE);
-    text(*canvas, "x", caption_start + 96 * scale, 23 * scale, 17 * scale, SK_ColorWHITE);
+    for (std::size_t i = 0; i + 1 < w->tabs.size(); ++i) {
+        if (w->tabs[i].id == w->active || w->tabs[i + 1].id == w->active) continue;
+        const Rect r = strip.tabs[i];
+        paint.setColor(theme_.separator);
+        canvas->drawRoundRect(SkRect::MakeXYWH(r.right() - 9 * scale,
+                                                r.y + 9 * scale, 1 * scale, 16 * scale),
+                              scale, scale, paint);
+    }
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+        if (w->tabs[i].id == w->active) paint_tab(i);
+    }
+    paint.setColor(hover_window_ == window && hover_new_tab_ ?
+                   theme_.new_tab_hover : theme_.new_tab);
+    canvas->drawRoundRect(skrect(strip.new_tab), 14 * scale, 14 * scale, paint);
+    text(*canvas, "+", strip.new_tab.x + 7 * scale, strip.new_tab.y + 21 * scale,
+         20 * scale, theme_.text);
+    canvas->restore();
+
+    constexpr const char* symbols[] = {"\xEE\xA4\xA1", "\xEE\xA4\xA2", "\xEE\xA2\xBB"};
+    for (int i = 0; i < 3; ++i) {
+        const float x = caption_start + i * 45 * scale;
+        if (hover_window_ == window && hover_caption_ == i) {
+            paint.setColor(i == 2 ? theme_.caption_close_hover : theme_.caption_hover);
+            canvas->drawRect(SkRect::MakeXYWH(x, 0, 45 * scale,
+                                               static_cast<float>(strip.height)), paint);
+        }
+        paint_caption_symbol(*canvas, symbols[i], x + 22.5f * scale,
+                             strip.height * 0.5f, 12 * scale, theme_.text);
+    }
     const Rect body{0, strip.height, size.width, std::max(0, size.height - strip.height)};
     canvas->save();
     canvas->clipRect(skrect(body));
