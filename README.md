@@ -45,7 +45,7 @@ The workbench deliberately draws a toolbar, sidebar, cards, and status area in i
 
 Run `tabengine_win32_demo.exe --raster` to force the Skia CPU backend for visual comparison or machines without D3D12. In the development workspace, **TabEngine (raster)** is also a VS Code launch choice. The default F5 entry uses the GPU-first renderer.
 
-Try tab selection and closing, the plus button, horizontal reordering, tearing a tab into a new native window, resizing, the workbench sidebar, **NEW WINDOW**, and **NEW TAB**. The demo starts with three tabs so these behaviors can be exercised immediately. Ctrl+T, Ctrl+W, Ctrl+N, and Ctrl+Tab switch or create tabs and windows. Automated checks cover model transfer, shell drag transfer, font pixels, hidden-window rendering, and D3D12 resize while keeping its backend. The current screenshot and interaction checks were performed on Windows with the repository's local Skia Debug package; native tear-off still needs a hands-on pointer check.
+Try tab selection and closing, the plus button, horizontal reordering, tearing a tab into a new native window, resizing, the workbench sidebar, **NEW WINDOW**, and **NEW TAB**. The demo starts with three tabs so these behaviors can be exercised immediately. Ctrl+T, Ctrl+W, Ctrl+N, and Ctrl+Tab switch or create tabs and windows. Automated checks cover model transfer, shell drag transfer, font pixels, hidden-window rendering, and D3D12 resize while keeping its backend. Windows screenshot checks confirmed GPU and raster rendering, resize, a second window, and a scripted native tear-off. Physical pointer feel and attachment to an existing window still need hands-on validation.
 
 ## Embedding boundary
 
