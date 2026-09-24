@@ -2,6 +2,7 @@
 
 #include "include/core/SkCanvas.h"
 
+#include <algorithm>
 #include <cassert>
 #include <memory>
 #include <string>
@@ -129,5 +130,19 @@ int main() {
     platform.emit({tabengine::EventType::Paint, target});
     assert(renderer->info(target).surface_size.width == 640);
     assert(renderer->info(target).surface_size.height == 480);
+
+    const auto before_cycle = shell.model().window(target)->active;
+    platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 9, true});
+    assert(shell.model().window(target)->active != before_cycle);
+    platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 9, true, true});
+    assert(shell.model().window(target)->active == before_cycle);
+
+    platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 'N', true});
+    const auto ids = shell.model().window_ids();
+    assert(ids.size() == 3);
+    const auto new_window = *std::max_element(ids.begin(), ids.end());
+    platform.emit({tabengine::EventType::KeyDown, new_window, {}, {}, {}, 'W', true});
+    assert(shell.model().window_ids().size() == 2);
+    assert(client.closed().size() == 1);
     return 0;
 }

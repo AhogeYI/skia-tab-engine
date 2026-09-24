@@ -310,7 +310,8 @@ private:
             return 0;
         case WM_KEYDOWN:
             self.emit(*native, {EventType::KeyDown, native->id, {}, {}, {},
-                                static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0});
+                                static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                                (GetKeyState(VK_SHIFT) & 0x8000) != 0});
             return 0;
         case WM_CLOSE:
             self.emit(*native, {EventType::CloseRequested});

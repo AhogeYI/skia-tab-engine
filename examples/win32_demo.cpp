@@ -128,9 +128,14 @@ public:
             const int row = static_cast<int>((y - 119) / 36);
             if (row >= 0 && row < 3) navigate(event.window, static_cast<Page>(row));
         }
-        if (x > body.width / scale - 142 && y > 113 && y < 151) {
-            next_page(Page::Workspace);
-            (void)shell_->new_tab(event.window);
+        if (y > 113 && y < 151) {
+            const float width = body.width / scale;
+            if (x > width - 270 && x < width - 150) {
+                (void)shell_->open_window({180, 140, 1000, 700});
+            } else if (x > width - 142 && x < width - 32) {
+                next_page(Page::Workspace);
+                (void)shell_->new_tab(event.window);
+            }
         }
     }
 
@@ -194,7 +199,7 @@ private:
         if (height > 500) {
             fill(canvas, 16, height - 100, 188, 76, 0xFF1D2D49, 8);
             label(canvas, "F5 WORKBENCH", 30, height - 72, 10, kAccent);
-            label(canvas, "Drag tabs between windows", 30, height - 47, 11);
+            label(canvas, "Ctrl+N  /  drag to detach", 30, height - 47, 11);
         }
     }
 
@@ -205,6 +210,8 @@ private:
         label(canvas, "WINDOWS / SKIA", x, 88, 11, kAccent);
         label(canvas, page_name(page), x, 128, 28);
         label(canvas, "A native tabbed shell with application-owned content.", x, 154, 13, kMuted);
+        fill(canvas, width - 270, 113, 120, 34, 0xFF273854, 17);
+        label(canvas, "+  NEW WINDOW", width - 255, 135, 11);
         fill(canvas, width - 142, 113, 110, 34, 0xFF2B4167, 17);
         label(canvas, "+  NEW TAB", width - 125, 135, 11);
         fill(canvas, x, 178, usable, 1, 0xFF2C3B59);

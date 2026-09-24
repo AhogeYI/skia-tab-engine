@@ -20,6 +20,7 @@ struct Event {
     Size size{};
     int key = 0;
     bool ctrl = false;
+    bool shift = false;
 };
 
 // The platform contract deliberately contains no HWND, NSWindow, or X11 type.

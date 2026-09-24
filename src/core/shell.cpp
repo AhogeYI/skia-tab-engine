@@ -153,9 +153,40 @@ void Shell::handle_event(const Event& event) {
     case EventType::Moving: handle_moving(event); break;
     case EventType::NativeMoveEnded: finish_native_drag(); break;
     case EventType::CloseRequested: close_window(event.window); break;
-    case EventType::KeyDown:
-        if (event.ctrl && (event.key == 'T' || event.key == 't')) (void)new_tab(event.window);
+    case EventType::KeyDown: {
+        if (event.ctrl && event.key == 'T') {
+            (void)new_tab(event.window);
+            break;
+        }
+        if (event.ctrl && event.key == 'W') {
+            const WindowTabs* w = model_.window(event.window);
+            if (w && w->active) (void)close_tab(event.window, w->active);
+            break;
+        }
+        if (event.ctrl && event.key == 'N') {
+            const Size size = platform_.client_size(event.window);
+            const Point origin = platform_.client_origin(event.window);
+            (void)open_window({origin.x + 40, origin.y + 40,
+                               std::max(640, size.width), std::max(480, size.height)});
+            break;
+        }
+        if (event.ctrl && event.key == 9) { // Tab
+            const WindowTabs* w = model_.window(event.window);
+            if (!w || w->tabs.size() < 2) break;
+            const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+                [w](const Tab& tab) { return tab.id == w->active; });
+            const std::size_t current = static_cast<std::size_t>(it - w->tabs.begin());
+            const std::size_t count = w->tabs.size();
+            const std::size_t next = event.shift ? (current + count - 1) % count
+                                                 : (current + 1) % count;
+            (void)select_tab(event.window, w->tabs[next].id);
+            break;
+        }
+        const auto strip = layout(event.window);
+        client_.body_event(event, {0, strip.height, event.size.width,
+                                   std::max(0, event.size.height - strip.height)});
         break;
+    }
     }
 }
 
