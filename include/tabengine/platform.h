@@ -69,6 +69,14 @@ public:
     virtual ~IPlatform() = default;
     virtual void set_event_handler(std::function<void(const Event&)> handler) = 0;
     virtual void set_caption_hit_handler(std::function<bool(WindowId, Point)> handler) = 0;
+    // Cross-thread wake for background work: a worker thread finished
+    // something the UI thread must drain. wake() is safe from any thread and
+    // never blocks; the handler set here runs on the thread that pumps the
+    // platform loop, never inline on the waking thread. Wakes may coalesce,
+    // so handlers must drain pending state rather than count calls.
+    // set_wake_handler is UI-thread only.
+    virtual void set_wake_handler(std::function<void()> handler) = 0;
+    virtual void wake() = 0;
     virtual bool create(WindowId id, Rect bounds, std::string_view title, bool visible) = 0;
     virtual void show(WindowId id) = 0;
     virtual void destroy(WindowId id) = 0;

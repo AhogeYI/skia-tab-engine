@@ -28,6 +28,12 @@ if(WIN32)
     target_include_directories(tabengine_win32 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_definitions(tabengine_win32 PRIVATE UNICODE _UNICODE)
     target_link_libraries(tabengine_win32 PUBLIC tabengine_core user32 dwmapi)
+
+    if(BUILD_TESTING)
+        add_executable(tabengine_wake_test tests/wake_test.cpp)
+        target_link_libraries(tabengine_wake_test PRIVATE tabengine_win32)
+        add_test(NAME tabengine_wake_test COMMAND tabengine_wake_test)
+    endif()
 endif()
 
 if(TABENGINE_BUILD_SKIA AND NOT WIN32)

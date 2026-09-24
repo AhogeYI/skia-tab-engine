@@ -19,6 +19,16 @@ public:
         handler_ = std::move(handler);
     }
     void set_caption_hit_handler(std::function<bool(tabengine::WindowId, tabengine::Point)>) override {}
+    void set_wake_handler(std::function<void()> handler) override { wake_handler_ = std::move(handler); }
+    void wake() override { ++wake_posts_; }
+    // Fakes queue wakes instead of posting: the test pumps them on the
+    // thread that would otherwise own the message loop.
+    void pump_wakes() {
+        while (wake_posts_ > 0) {
+            --wake_posts_;
+            if (wake_handler_) wake_handler_();
+        }
+    }
     bool create(tabengine::WindowId id, tabengine::Rect bounds, std::string_view title, bool) override {
         windows_.emplace(id, bounds);
         titles_[id] = title;
@@ -84,6 +94,8 @@ private:
     std::unordered_map<tabengine::WindowId, tabengine::Rect> windows_;
     std::unordered_map<tabengine::WindowId, std::string> titles_;
     std::function<void(const tabengine::Event&)> handler_;
+    std::function<void()> wake_handler_;
+    int wake_posts_ = 0;
     tabengine::WindowId attach_target_ = 0;
     tabengine::Point attach_point_{};
     bool ended_ = false;

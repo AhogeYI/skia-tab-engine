@@ -17,6 +17,15 @@ public:
         events = std::move(handler);
     }
     void set_caption_hit_handler(std::function<bool(WindowId, Point)>) override {}
+    void set_wake_handler(std::function<void()> handler) override { wake_handler = std::move(handler); }
+    void wake() override { ++wake_posts; }
+    // Fakes queue wakes; tests pump them on the "UI" thread explicitly.
+    void pump_wakes() {
+        while (wake_posts > 0) {
+            --wake_posts;
+            if (wake_handler) wake_handler();
+        }
+    }
     bool create(WindowId id, Rect bounds, std::string_view, bool) override {
         return windows.emplace(id, bounds).second;
     }
@@ -53,6 +62,8 @@ public:
     }
 
     std::function<void(const Event&)> events;
+    std::function<void()> wake_handler;
+    int wake_posts = 0;
     std::unordered_map<WindowId, Rect> windows;
 };
 

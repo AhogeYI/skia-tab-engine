@@ -17,6 +17,7 @@ namespace tabengine {
 namespace {
 
 constexpr wchar_t kClassName[] = L"TabEngineWindow";
+constexpr wchar_t kWakeClassName[] = L"TabEngineWake";
 constexpr UINT_PTR kAnimationTimer = 1;
 
 std::wstring widen(std::string_view utf8) {
@@ -40,11 +41,25 @@ public:
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.lpszClassName = kClassName;
         RegisterClassExW(&wc);
+        // Message-only window: its only job is to own the cross-thread wake
+        // so a PostMessage can break the GetMessageW sleep.
+        WNDCLASSEXW wake_wc{};
+        wake_wc.cbSize = sizeof(wake_wc);
+        wake_wc.lpfnWndProc = &Win32Platform::wake_proc;
+        wake_wc.hInstance = GetModuleHandleW(nullptr);
+        wake_wc.lpszClassName = kWakeClassName;
+        RegisterClassExW(&wake_wc);
+        wake_hwnd_ = CreateWindowExW(0, kWakeClassName, L"", WS_OVERLAPPED, 0, 0, 0, 0,
+                                     HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), this);
     }
 
     ~Win32Platform() override {
         flush_destroy();
         while (!windows_.empty()) destroy(windows_.begin()->first);
+        if (wake_hwnd_) {
+            DestroyWindow(wake_hwnd_);
+            wake_hwnd_ = nullptr;
+        }
     }
 
     void set_event_handler(std::function<void(const Event&)> handler) override {
@@ -53,6 +68,16 @@ public:
 
     void set_caption_hit_handler(std::function<bool(WindowId, Point)> handler) override {
         caption_hit_ = std::move(handler);
+    }
+
+    void set_wake_handler(std::function<void()> handler) override {
+        wake_ = std::move(handler);
+    }
+
+    void wake() override {
+        // Post, never send: a synchronous SendMessage would run the handler on
+        // the waking thread instead of the pumping thread.
+        if (wake_hwnd_) PostMessageW(wake_hwnd_, WM_APP, 0, 0);
     }
 
     bool create(WindowId id, Rect bounds, std::string_view title, bool visible) override {
@@ -258,6 +283,21 @@ private:
         for (WindowId id : pending) destroy_now(id);
     }
 
+    static LRESULT CALLBACK wake_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+        if (message == WM_NCCREATE) {
+            auto* create = reinterpret_cast<CREATESTRUCTW*>(lp);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                              reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+            return DefWindowProcW(hwnd, message, wp, lp);
+        }
+        auto* self = reinterpret_cast<Win32Platform*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (message == WM_APP) {
+            if (self && self->wake_) self->wake_();
+            return 0;
+        }
+        return DefWindowProcW(hwnd, message, wp, lp);
+    }
+
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         Native* native = reinterpret_cast<Native*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
@@ -440,6 +480,8 @@ private:
     std::unordered_map<WindowId, std::unique_ptr<Native>> windows_;
     std::function<void(const Event&)> events_;
     std::function<bool(WindowId, Point)> caption_hit_;
+    std::function<void()> wake_;
+    HWND wake_hwnd_ = nullptr;
     std::vector<WindowId> pending_destroy_;
     int emitting_ = 0;
 };
