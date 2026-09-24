@@ -9,7 +9,7 @@ namespace tabengine {
 
 enum class EventType {
     Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
-    KeyDown, CloseRequested, Moving,
+    KeyDown, TextInput, CloseRequested, Moving,
     WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged,
     AnimationFrame
 };
@@ -25,6 +25,34 @@ struct Event {
     int key = 0;
     bool ctrl = false;
     bool shift = false;
+    bool alt = false;
+    // TextInput only: one completed Unicode code point. Characters are text,
+    // never shortcuts: Shell forwards TextInput straight to IClient::body_event
+    // without the handle_shortcut hook or the engine's default key bindings.
+    char32_t code_point = 0;
+};
+
+// UTF-16 backends receive an astral character as a high + low surrogate pair
+// across two messages. Feed each unit; a code point completes when feed()
+// returns true. A dangling high surrogate before a non-surrogate unit is
+// dropped; a lone low surrogate passes through unchanged.
+struct SurrogateComposer {
+    char32_t pending_high = 0;
+    char32_t code_point = 0;
+    bool feed(char32_t unit) {
+        if (unit >= 0xD800 && unit <= 0xDBFF) {
+            pending_high = unit;
+            return false;
+        }
+        if (unit >= 0xDC00 && unit <= 0xDFFF && pending_high != 0) {
+            code_point = 0x10000 + ((pending_high - 0xD800) << 10) + (unit - 0xDC00);
+            pending_high = 0;
+            return true;
+        }
+        pending_high = 0;
+        code_point = unit;
+        return true;
+    }
 };
 
 // The platform contract deliberately contains no HWND, NSWindow, or X11 type.

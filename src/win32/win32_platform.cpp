@@ -229,6 +229,7 @@ private:
         Win32Platform* platform = nullptr;
         WindowId id = 0;
         HWND hwnd = nullptr;
+        SurrogateComposer chars;
         bool in_move_loop = false;
         bool move_loop_canceled = false;
         bool move_loop_mouse_up = false;
@@ -352,10 +353,30 @@ private:
             self.emit(*native, {EventType::CaptureLost});
             return 0;
         case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
+            const bool alt_held = (GetKeyState(VK_MENU) & 0x8000) != 0;
             self.emit(*native, {EventType::KeyDown, native->id, {}, {}, {},
                                 static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0,
-                                (GetKeyState(VK_SHIFT) & 0x8000) != 0});
+                                (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt_held});
+            // Alt+F4 (close) and Alt+Space (system menu) stay with the system;
+            // every other Alt combo (browser-style Back/Forward) is app input.
+            if (message == WM_SYSKEYDOWN) {
+                if (wp != VK_F4 && wp != VK_SPACE) return 0;
+                break;
+            }
             return 0;
+        }
+        case WM_CHAR: {
+            // WM_SYSCHAR is not translated: an Alt+letter mnemonic is a command,
+            // not text. Astral characters arrive as two surrogate units.
+            if (native->chars.feed(static_cast<char32_t>(wp))) {
+                Event text;
+                text.type = EventType::TextInput;
+                text.code_point = native->chars.code_point;
+                self.emit(*native, text);
+            }
+            return 0;
+        }
         case WM_ACTIVATE:
             self.emit(*native, {LOWORD(wp) == WA_INACTIVE ? EventType::WindowDeactivated
                                                        : EventType::WindowActivated});

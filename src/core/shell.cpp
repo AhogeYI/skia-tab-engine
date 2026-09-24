@@ -477,6 +477,13 @@ void Shell::handle_event(const Event& event) {
         break;
     case EventType::Moving: handle_moving(event); break;
     case EventType::AnimationFrame: advance_animations(event.window); break;
+    case EventType::TextInput: {
+        if (!model_.window(event.window)) break;
+        const auto strip = layout(event.window);
+        client_.body_event(event, {0, strip.height, event.size.width,
+                                   std::max(0, event.size.height - strip.height)});
+        break;
+    }
     case EventType::CloseRequested: close_window(event.window); break;
     case EventType::KeyDown: {
         if (event.key == 27 && drag_.window == event.window &&
