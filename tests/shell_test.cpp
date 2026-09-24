@@ -99,7 +99,10 @@ public:
     void paint_body(tabengine::WindowId, tabengine::TabId, SkCanvas&, tabengine::Rect) override {}
     void body_event(const tabengine::Event&, tabengine::Rect) override {}
     void paint_tab_icon(tabengine::WindowId, tabengine::TabId tab, SkCanvas&,
-                        tabengine::Rect bounds) override { icon_x_[tab] = bounds.x; }
+                        tabengine::Rect bounds) override {
+        icon_x_[tab] = bounds.x;
+        paint_order_.push_back(tab);
+    }
     std::string hover_card_subtitle(tabengine::WindowId, tabengine::TabId,
                                     tabengine::ContentId) override { return "Preview"; }
     void paint_hover_card_preview(tabengine::WindowId, tabengine::TabId,
@@ -109,13 +112,33 @@ public:
     const std::vector<tabengine::ContentId>& closed() const { return closed_; }
     int icon_x(tabengine::TabId tab) const { return icon_x_.at(tab); }
     int preview_paints() const { return preview_paints_; }
+    void clear_paint_order() { paint_order_.clear(); }
+    const std::vector<tabengine::TabId>& paint_order() const { return paint_order_; }
 
 private:
     tabengine::ContentId next_ = 1;
     std::vector<tabengine::ContentId> closed_;
     std::unordered_map<tabengine::TabId, int> icon_x_;
+    std::vector<tabengine::TabId> paint_order_;
     int preview_paints_ = 0;
 };
+
+void check_hover_paint_order() {
+    FakePlatform platform;
+    auto renderer = tabengine::make_skia_raster_renderer();
+    Client client;
+    tabengine::Shell shell(platform, *renderer, client);
+    const auto window = shell.open_window({100, 100, 900, 600});
+    const auto first = shell.model().window(window)->tabs.front().id;
+    const auto second = shell.new_tab(window);
+    const auto active = shell.new_tab(window);
+    platform.now = 0.25;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    platform.emit({tabengine::EventType::PointerMove, window, {70, 20}, {170, 120}});
+    client.clear_paint_order();
+    platform.emit({tabengine::EventType::Paint, window});
+    assert((client.paint_order() == std::vector<tabengine::TabId>{second, first, active}));
+}
 
 void check_hover_card_visual() {
     FakePlatform platform;
@@ -313,5 +336,6 @@ int main() {
     check_close_visual();
     check_hover_and_reorder_visual();
     check_hover_card_visual();
+    check_hover_paint_order();
     return 0;
 }

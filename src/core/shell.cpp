@@ -1242,6 +1242,18 @@ void Shell::paint(WindowId window) {
         canvas->translate(static_cast<float>(r.x), static_cast<float>(r.y));
         canvas->drawPath(tab_face(r, scale, active), paint);
         canvas->restore();
+        if (i + 1 < w->tabs.size() && !active && !tab.closing &&
+            w->tabs[i + 1].id != w->active && !w->tabs[i + 1].closing &&
+            i != dragged_index && i + 1 != dragged_index) {
+            paint.setColor(theme_.separator);
+            canvas->drawRoundRect(SkRect::MakeXYWH(
+                                      r.right() - (detail::ChromeMetrics::overlap +
+                                                   detail::ChromeMetrics::separator_width) * scale / 2,
+                                      r.y + (r.height - detail::ChromeMetrics::separator_height * scale) / 2,
+                                      detail::ChromeMetrics::separator_width * scale,
+                                      detail::ChromeMetrics::separator_height * scale),
+                                  scale, scale, paint);
+        }
         const int icon_size = static_cast<int>(16 * scale);
         const Rect icon{r.x + static_cast<int>(20 * scale),
                         r.y + (r.height - icon_size) / 2, icon_size, icon_size};
@@ -1264,31 +1276,28 @@ void Shell::paint(WindowId window) {
                                      theme_.text : theme_.tab_close);
         }
     };
-    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
-        if (w->tabs[i].id != w->active && !w->tabs[i].closing &&
-            i != dragged_index) paint_tab(i);
-    }
-    for (std::size_t i = 0; i + 1 < w->tabs.size(); ++i) {
-        if (w->tabs[i].id == w->active || w->tabs[i + 1].id == w->active ||
-            w->tabs[i].closing || w->tabs[i + 1].closing ||
-            i == dragged_index || i + 1 == dragged_index) continue;
-        const Rect r = visual_tab_bounds(window, w->tabs[i].id, strip.tabs[i]);
-        paint.setColor(theme_.separator);
-        canvas->drawRoundRect(SkRect::MakeXYWH(
-                                  r.right() - (detail::ChromeMetrics::overlap +
-                                               detail::ChromeMetrics::separator_width) * scale / 2,
-                                  r.y + (r.height - detail::ChromeMetrics::separator_height * scale) / 2,
-                                  detail::ChromeMetrics::separator_width * scale,
-                                  detail::ChromeMetrics::separator_height * scale),
-                              scale, scale, paint);
-    }
-    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
-        if (w->tabs[i].id == w->active && i != dragged_index) paint_tab(i);
-    }
-    for (std::size_t i = 0; i < w->tabs.size(); ++i) {
-        if (w->tabs[i].closing) paint_tab(i);
-    }
-    if (dragged_index < w->tabs.size()) paint_tab(dragged_index);
+    std::vector<std::size_t> paint_order;
+    paint_order.reserve(w->tabs.size());
+    for (std::size_t i = 0; i < w->tabs.size(); ++i) paint_order.push_back(i);
+    const auto visual = visuals_.find(window);
+    const double now = platform_.monotonic_seconds();
+    const auto paint_priority = [&](std::size_t i) {
+        const Tab& tab = w->tabs[i];
+        const TabVisual* state = nullptr;
+        if (visual != visuals_.end()) {
+            const auto it = visual->second.tabs.find(tab.id);
+            if (it != visual->second.tabs.end()) state = &it->second;
+        }
+        if (i == dragged_index || (state && state->bounds.active(now)))
+            return 5;
+        if (tab.closing) return 4;
+        if (tab.id == w->active) return 3;
+        if (hover_window_ == window && hover_tab_ == tab.id) return 2;
+        return 1;
+    };
+    std::stable_sort(paint_order.begin(), paint_order.end(),
+        [&](std::size_t a, std::size_t b) { return paint_priority(a) < paint_priority(b); });
+    for (std::size_t i : paint_order) paint_tab(i);
     const Rect new_tab = visual_new_tab_bounds(window, strip);
     paint.setColor(blend_color(theme_.new_tab, theme_.new_tab_hover,
                                new_tab_hover_amount(window)));
