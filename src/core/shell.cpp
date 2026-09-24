@@ -75,6 +75,24 @@ float ease_out(double elapsed, double duration) {
     return 1.0f - (1.0f - t) * (1.0f - t);
 }
 
+float fast_out_slow_in_tween(double elapsed, double duration) {
+    const float x = static_cast<float>(std::clamp(elapsed / duration, 0.0, 1.0));
+    auto bezier = [](float t, float p1, float p2) {
+        const float u = 1.0f - t;
+        return 3.0f * u * u * t * p1 + 3.0f * u * t * t * p2 + t * t * t;
+    };
+    float t = x;
+    for (int i = 0; i < 8; ++i) {
+        const float u = 1.0f - t;
+        const float dx = 3.0f * u * u * 0.4f +
+                         6.0f * u * t * (0.2f - 0.4f) +
+                         3.0f * t * t * (1.0f - 0.2f);
+        if (std::abs(dx) < 0.000001f) break;
+        t = std::clamp(t - (bezier(t, 0.4f, 0.2f) - x) / dx, 0.0f, 1.0f);
+    }
+    return bezier(t, 0.0f, 1.0f);
+}
+
 int interpolate(int from, int to, float t) {
     return static_cast<int>(std::lround(from + (to - from) * t));
 }
@@ -121,7 +139,8 @@ bool Shell::AnimatedRect::active(double now) const {
 
 float Shell::AnimatedFloat::at(double now) const {
     return running ? from + (to - from) *
-        ease_out(now - started, detail::ChromeMetrics::hover_duration_s) : to;
+        (fast_out_slow_in ? fast_out_slow_in_tween(now - started, duration) :
+                            ease_out(now - started, duration)) : to;
 }
 
 void Shell::AnimatedFloat::retarget(float target, double now) {
@@ -133,7 +152,7 @@ void Shell::AnimatedFloat::retarget(float target, double now) {
 }
 
 bool Shell::AnimatedFloat::active(double now) const {
-    return running && now - started < detail::ChromeMetrics::hover_duration_s;
+    return running && now - started < duration;
 }
 
 Shell::Shell(IPlatform& platform, IRenderer& renderer, IClient& client)
@@ -189,6 +208,7 @@ WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
 TabId Shell::new_tab(WindowId window) {
     const WindowTabs* w = model_.window(window);
     if (!w || !busy_windows_.insert(window).second) return 0;
+    hide_hover_card(window);
     sync_visuals(window);
     const TabId previous = w->active;
     NewTab created = client_.create_tab();
@@ -230,6 +250,10 @@ bool Shell::close_tab(WindowId window, TabId tab) {
         return true;
     }
     if (hover_window_ == window && hover_tab_ == tab) clear_hover(window);
+    const auto visual = visuals_.find(window);
+    if (visual != visuals_.end() &&
+        (visual->second.card.pending == tab || visual->second.card.displayed == tab))
+        hide_hover_card(window);
     sync_visuals(window);
     if (drag_.window == window && drag_.tab == tab) {
         drag_ = {};
@@ -405,6 +429,10 @@ void Shell::handle_event(const Event& event) {
     case EventType::Resized:
         renderer_.resize(event.window, event.size);
         sync_visuals(event.window, 0, false);
+        if (auto visual = visuals_.find(event.window);
+            visual != visuals_.end() && visual->second.card.displayed)
+            visual->second.card.bounds.snap(
+                hover_card_bounds(event.window, visual->second.card.displayed));
         client_.body_geometry_changed(event.window, body_bounds(event.window),
                                       platform_.scale(event.window));
         if (model_.window(event.window)) platform_.invalidate(event.window);
@@ -412,6 +440,10 @@ void Shell::handle_event(const Event& event) {
     case EventType::DpiChanged:
         renderer_.resize(event.window, platform_.client_size(event.window));
         sync_visuals(event.window, 0, false);
+        if (auto visual = visuals_.find(event.window);
+            visual != visuals_.end() && visual->second.card.displayed)
+            visual->second.card.bounds.snap(
+                hover_card_bounds(event.window, visual->second.card.displayed));
         client_.dpi_changed(event.window, platform_.scale(event.window));
         if (!model_.window(event.window)) break;
         client_.body_geometry_changed(event.window, body_bounds(event.window),
@@ -451,6 +483,14 @@ void Shell::handle_event(const Event& event) {
             drag_.phase != DragPhase::Idle) {
             cancel_drag();
             break;
+        }
+        if (event.key == 27) {
+            const auto visual = visuals_.find(event.window);
+            if (visual != visuals_.end() &&
+                (visual->second.card.pending || visual->second.card.showing)) {
+                hide_hover_card(event.window);
+                break;
+            }
         }
         if (client_.handle_shortcut(event) || !model_.window(event.window)) break;
         if (event.ctrl && event.key == 'T') {
@@ -598,12 +638,134 @@ float Shell::new_tab_hover_amount(WindowId window) const {
         visual->second.new_tab_hover.at(platform_.monotonic_seconds());
 }
 
+Rect Shell::hover_card_bounds(WindowId window, TabId tab) const {
+    const WindowTabs* w = model_.window(window);
+    if (!w) return {};
+    const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+        [tab](const Tab& item) { return item.id == tab && !item.closing; });
+    if (it == w->tabs.end()) return {};
+    const StripLayout strip = layout(window);
+    const std::size_t index = static_cast<std::size_t>(it - w->tabs.begin());
+    const Rect anchor = visual_tab_bounds(window, tab, strip.tabs[index]);
+    const float scale = platform_.scale(window);
+    const int width = std::min(platform_.client_size(window).width,
+        static_cast<int>(std::lround(detail::ChromeMetrics::hover_card_width * scale)));
+    const bool preview = w->active != tab;
+    const int height = static_cast<int>(std::lround(
+        (detail::ChromeMetrics::hover_card_footer_height +
+         (preview ? detail::ChromeMetrics::hover_card_preview_height : 0)) * scale));
+    const int x = std::clamp(anchor.x + anchor.width / 2 - width / 2, 0,
+                             std::max(0, platform_.client_size(window).width - width));
+    return {x, anchor.bottom(), width, height};
+}
+
+void Shell::hide_hover_card(WindowId window) {
+    auto visual = visuals_.find(window);
+    if (visual == visuals_.end()) return;
+    auto& card = visual->second.card;
+    card.pending = 0;
+    if (!card.showing) return;
+    card.showing = false;
+    card.opacity.duration = detail::ChromeMetrics::hover_card_fade_out_s;
+    card.opacity.fast_out_slow_in = true;
+    card.opacity.retarget(0.0f, platform_.monotonic_seconds());
+    schedule_animation(window);
+    platform_.invalidate(window);
+}
+
+void Shell::update_hover_card(WindowId window, TabId tab, Point client) {
+    auto& card = visuals_[window].card;
+    const double now = platform_.monotonic_seconds();
+    if (!tab) {
+        if (card.showing && card.bounds.at(now).contains(client)) return;
+        hide_hover_card(window);
+        return;
+    }
+    if (card.showing) {
+        if (card.displayed != tab) {
+            card.displayed = tab;
+            card.bounds.retarget(hover_card_bounds(window, tab), now);
+            schedule_animation(window);
+            platform_.invalidate(window);
+        }
+        return;
+    }
+    if (card.pending == tab) return;
+    card.pending = tab;
+    card.show_at = now + detail::ChromeMetrics::hover_card_delay_s;
+    schedule_animation(window);
+}
+
+void Shell::paint_hover_card(WindowId window, SkCanvas& canvas) {
+    const auto visual = visuals_.find(window);
+    const WindowTabs* w = model_.window(window);
+    if (visual == visuals_.end() || !w) return;
+    const auto& card = visual->second.card;
+    const double now = platform_.monotonic_seconds();
+    const float opacity = card.opacity.at(now);
+    if (!card.displayed || opacity <= 0.01f) return;
+    const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
+        [id = card.displayed](const Tab& tab) { return tab.id == id && !tab.closing; });
+    if (it == w->tabs.end()) return;
+    const Tab tab = *it;
+    const Rect bounds = card.bounds.at(now);
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const float scale = platform_.scale(window);
+    const bool preview = w->active != card.displayed;
+    const int preview_height = preview ? static_cast<int>(std::lround(
+        detail::ChromeMetrics::hover_card_preview_height * scale)) : 0;
+    canvas.save();
+    canvas.saveLayerAlphaf(nullptr, opacity);
+    SkPaint paint;
+    paint.setAntiAlias(true);
+    const SkRRect panel = SkRRect::MakeRectXY(skrect(bounds), 8 * scale, 8 * scale);
+    paint.setColor(theme_.hover_card);
+    canvas.drawRRect(panel, paint);
+    paint.setStyle(SkPaint::kStroke_Style);
+    paint.setStrokeWidth(std::max(1.0f, scale));
+    paint.setColor(theme_.hover_card_border);
+    canvas.drawRRect(panel, paint);
+    paint.setStyle(SkPaint::kFill_Style);
+    canvas.clipRRect(panel, true);
+    if (preview) {
+        const Rect preview_bounds{bounds.x, bounds.y, bounds.width, preview_height};
+        paint.setColor(theme_.strip);
+        canvas.drawRect(skrect(preview_bounds), paint);
+        canvas.save();
+        canvas.clipRect(skrect(preview_bounds));
+        client_.paint_hover_card_preview(window, tab.id, tab.content, canvas,
+                                         preview_bounds);
+        canvas.restore();
+        paint.setColor(theme_.hover_card_border);
+        canvas.drawRect(SkRect::MakeXYWH(static_cast<float>(bounds.x),
+                         static_cast<float>(bounds.y + preview_height - 1),
+                         static_cast<float>(bounds.width), 1.0f), paint);
+    }
+    const float left = bounds.x + 12 * scale;
+    const float footer = static_cast<float>(bounds.y + preview_height);
+    canvas.clipRect(SkRect::MakeLTRB(left, footer,
+        static_cast<float>(bounds.right() - 12 * scale),
+        static_cast<float>(bounds.bottom())));
+    text(canvas, tab.title, left, footer + 20 * scale, 12 * scale, theme_.text);
+    const std::string subtitle = client_.hover_card_subtitle(window, tab.id, tab.content);
+    if (!subtitle.empty())
+        text(canvas, subtitle, left, footer + 39 * scale, 11 * scale, theme_.text_muted);
+    canvas.restore();
+    canvas.restore();
+}
+
 void Shell::schedule_animation(WindowId window) {
     const auto visual = visuals_.find(window);
     const WindowTabs* w = model_.window(window);
     if (visual == visuals_.end() || !w) return;
     if (std::any_of(w->tabs.begin(), w->tabs.end(),
                     [](const Tab& tab) { return tab.closing; })) {
+        platform_.request_animation_frame(window);
+        return;
+    }
+    const auto& card = visual->second.card;
+    if (card.pending || card.bounds.active(platform_.monotonic_seconds()) ||
+        card.opacity.active(platform_.monotonic_seconds())) {
         platform_.request_animation_frame(window);
         return;
     }
@@ -656,6 +818,27 @@ void Shell::advance_animations(WindowId window) {
     }
     for (TabId tab : finished) finish_close_tab(window, tab);
     if (!model_.window(window)) return;
+    auto& card = visuals_[window].card;
+    if (card.pending && now >= card.show_at) {
+        const TabId tab = card.pending;
+        card.pending = 0;
+        const Rect target = hover_card_bounds(window, tab);
+        if (target.width > 0) {
+            if (!card.displayed || card.opacity.at(now) <= 0.0f)
+                card.bounds.snap(target);
+            else
+                card.bounds.retarget(target, now);
+            card.displayed = tab;
+            card.showing = true;
+            card.opacity.duration = detail::ChromeMetrics::hover_card_fade_in_s;
+            card.opacity.fast_out_slow_in = true;
+            card.opacity.retarget(1.0f, now);
+        }
+    }
+    if (card.showing && card.displayed)
+        card.bounds.retarget(hover_card_bounds(window, card.displayed), now);
+    if (!card.showing && !card.opacity.active(now) && card.opacity.at(now) <= 0.0f)
+        card.displayed = 0;
     platform_.invalidate(window);
     schedule_animation(window);
 }
@@ -721,6 +904,7 @@ bool Shell::caption_hit(WindowId window, Point client) const {
 
 void Shell::clear_hover(WindowId window) {
     if (hover_window_ != window) return;
+    hide_hover_card(window);
     const double now = platform_.monotonic_seconds();
     auto& visual = visuals_[window];
     if (auto it = visual.tabs.find(hover_tab_); it != visual.tabs.end())
@@ -763,7 +947,10 @@ void Shell::update_hover(WindowId window, Point client) {
         }
     }
     if (hover_window_ == window && hover_tab_ == tab && hover_close_ == close &&
-        hover_new_tab_ == new_tab && hover_caption_ == caption) return;
+        hover_new_tab_ == new_tab && hover_caption_ == caption) {
+        update_hover_card(window, tab, client);
+        return;
+    }
     const TabId old_tab = hover_window_ == window ? hover_tab_ : 0;
     const bool old_new_tab = hover_window_ == window && hover_new_tab_;
     if (hover_window_ && hover_window_ != window) clear_hover(hover_window_);
@@ -782,6 +969,7 @@ void Shell::update_hover(WindowId window, Point client) {
     hover_close_ = close;
     hover_new_tab_ = new_tab;
     hover_caption_ = caption;
+    update_hover_card(window, tab, client);
     schedule_animation(window);
     platform_.invalidate(window);
 }
@@ -795,6 +983,11 @@ void Shell::handle_pointer(const Event& event) {
     if (event.type == EventType::PointerMove && drag_.phase == DragPhase::Idle)
         update_hover(event.window, event.client);
     if (event.type == EventType::PointerDown) {
+        const auto visual = visuals_.find(event.window);
+        const bool card_hit = visual != visuals_.end() && visual->second.card.showing &&
+            visual->second.card.bounds.at(platform_.monotonic_seconds()).contains(event.client);
+        hide_hover_card(event.window);
+        if (card_hit) return;
         if (event.client.y >= strip.height) {
             client_.body_event(event, {0, strip.height, event.size.width,
                                        event.size.height - strip.height});
@@ -989,6 +1182,12 @@ void Shell::paint(WindowId window) {
     }
     SkCanvas* canvas = renderer_.canvas(window);
     if (!canvas) return;
+    struct PaintGuard {
+        std::unordered_set<WindowId>& busy;
+        WindowId window;
+        bool owns;
+        ~PaintGuard() { if (owns) busy.erase(window); }
+    } guard{busy_windows_, window, busy_windows_.insert(window).second};
     const float scale = platform_.scale(window);
     const StripLayout strip = layout(window);
     const bool dragging = drag_.phase == DragPhase::InStrip && drag_.window == window;
@@ -1113,6 +1312,7 @@ void Shell::paint(WindowId window) {
     canvas->clipRect(skrect(body));
     client_.paint_body(window, w->active, *canvas, body);
     canvas->restore();
+    paint_hover_card(window, *canvas);
     renderer_.present(window, platform_.native_handle(window));
 }
 

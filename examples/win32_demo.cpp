@@ -104,6 +104,29 @@ public:
               rect.x + 3.5f, rect.y + 12.5f, 11, 0xFF0D1526);
     }
 
+    std::string hover_card_subtitle(WindowId, TabId, ContentId content) override {
+        const auto it = pages_.find(content);
+        return it == pages_.end() ? "Workbench" :
+            "Workbench  /  " + std::string(page_name(it->second));
+    }
+
+    void paint_hover_card_preview(WindowId, TabId, ContentId content, SkCanvas& canvas,
+                                  Rect bounds) override {
+        const auto it = pages_.find(content);
+        const Page page = it == pages_.end() ? Page::Workspace : it->second;
+        const float x = static_cast<float>(bounds.x);
+        const float y = static_cast<float>(bounds.y);
+        const float w = static_cast<float>(bounds.width);
+        const float h = static_cast<float>(bounds.height);
+        fill(canvas, x, y, w, h, 0xFF172540);
+        fill(canvas, x + 12, y + 12, std::max(0.0f, w - 24), 24, 0xFF0D1526, 8);
+        fill(canvas, x + 12, y + 49, w * 0.28f, std::max(0.0f, h - 61), 0xFF223657, 5);
+        fill(canvas, x + w * 0.36f, y + 49, w * 0.58f,
+             std::max(0.0f, h - 61), 0xFF243B5B, 5);
+        fill(canvas, x + w * 0.38f, y + 61, w * 0.18f, 5, page_color(page), 2.5f);
+        label(canvas, page_name(page), x + w * 0.38f, y + 87, 12, kText);
+    }
+
     void paint_body(WindowId window, TabId active, SkCanvas& canvas, Rect body) override {
         const Page page = page_for(window, active);
         const float scale = platform_->scale(window);

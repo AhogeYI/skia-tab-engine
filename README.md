@@ -10,13 +10,14 @@ This repository is being developed independently. It does not implement an addre
 - Content attach/detach and active-tab notifications, body geometry updates, and vetoable tab/window closure. Transfers keep the application-owned content alive; final closure reports it once.
 - Win32 activation, DPI, and settled window placement notifications; host-first keyboard shortcut handling; Escape, capture loss, or deactivation restores an in-strip drag's original order. A canceled native tear-off restores the original tab and content to their source window when it still exists.
 - 200 ms ease-out tab creation, close, reorder, and drag settling; 120 ms tab and new-tab hover color transitions. The platform supplies monotonic time and one-shot animation frames.
+- A 300 ms delayed tab hover card with 200 ms fade-in, 150 ms fade-out, and animated movement between tabs. The application supplies its subtitle and optional preview painting.
 - Width adapting tab strip, selection, close and new tab controls, pointer-following in-strip drag with a moving new-tab button, reorder, and a Win32 native window move loop for tear off and attach.
 - Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a visual workbench application.
 - DirectWrite-backed Skia UI and caption typefaces so tab titles and controls render in the Windows build.
 - Headless core and shell tests, plus a hidden-HWND renderer smoke test. The core can be configured without Skia on other platforms.
 - Configurable chrome colors and leading-slot width, application-painted tab icons and optional caption buttons, and render backend/surface-size diagnostics.
 
-The Windows demo now presents Skia drawings through D3D12 when a suitable hardware adapter and swapchain are available. If initialization or presentation fails, it uses Skia raster pixels via `StretchDIBits`. Hover cards, keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
+The Windows demo now presents Skia drawings through D3D12 when a suitable hardware adapter and swapchain are available. If initialization or presentation fails, it uses Skia raster pixels via `StretchDIBits`. Keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
 
 ## Build
 
@@ -59,6 +60,8 @@ Try tab selection and closing, the plus button, horizontal reordering, tearing a
 `Shell::set_chrome_options` changes the application-painted leading slot and reserves up to four extra caption buttons before the system controls. The host paints and handles those buttons through `IClient`; TabEngine keeps their layout and hit testing aligned with the tab strip.
 
 `IClient::handle_shortcut` runs before the built-in Ctrl+T/W/N/Tab bindings. Activation, DPI, and settled interactive placement changes are delivered through separate `IClient` callbacks. Placement uses client-area bounds in screen pixels; `body_geometry_changed` reports the drawable area inside the window.
+
+Hover cards use the library's delay, placement, hit testing, fade, and slide behavior. `hover_card_subtitle` returns application text; `paint_hover_card_preview` receives the preview area on the same Skia canvas. The active tab's card omits its preview, and the workbench paints a small application-owned preview for inactive tabs.
 
 `IPlatform::run_native_move_loop` returns `Completed`, `Canceled`, or `Unsupported`. A canceled tear-off reattaches the tab at its original index and destroys the temporary window; an attach request over another tab strip takes precedence over the move loop's canceled result. If the original window disappears during the move, the torn window keeps the content alive. No drag rollback calls `tab_closed`.
 

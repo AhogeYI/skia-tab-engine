@@ -23,6 +23,12 @@ struct ChromeMetrics {
     static constexpr int separator_height = 16;
     static constexpr double bounds_duration_s = 0.200;
     static constexpr double hover_duration_s = 0.120;
+    static constexpr double hover_card_delay_s = 0.300;
+    static constexpr double hover_card_fade_in_s = 0.200;
+    static constexpr double hover_card_fade_out_s = 0.150;
+    static constexpr int hover_card_width = 256;
+    static constexpr int hover_card_preview_height = 144;
+    static constexpr int hover_card_footer_height = 48;
 };
 
 } // namespace tabengine::detail

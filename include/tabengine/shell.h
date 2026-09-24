@@ -49,6 +49,8 @@ public:
     virtual void body_event(const Event& event, Rect body) = 0;
     virtual void paint_leading(WindowId, SkCanvas&, Rect) {}
     virtual void paint_tab_icon(WindowId, TabId, SkCanvas&, Rect) {}
+    virtual std::string hover_card_subtitle(WindowId, TabId, ContentId) { return {}; }
+    virtual void paint_hover_card_preview(WindowId, TabId, ContentId, SkCanvas&, Rect) {}
 };
 
 class Shell {
@@ -103,6 +105,8 @@ private:
         float from = 0.0f;
         float to = 0.0f;
         double started = 0.0;
+        double duration = 0.120;
+        bool fast_out_slow_in = false;
         bool running = false;
         [[nodiscard]] float at(double now) const;
         void retarget(float target, double now);
@@ -115,6 +119,14 @@ private:
     struct WindowVisual {
         std::unordered_map<TabId, TabVisual> tabs;
         AnimatedFloat new_tab_hover;
+        struct HoverCard {
+            TabId pending = 0;
+            TabId displayed = 0;
+            double show_at = 0.0;
+            bool showing = false;
+            AnimatedRect bounds;
+            AnimatedFloat opacity;
+        } card;
     };
 
     void handle_event(const Event& event);
@@ -132,6 +144,10 @@ private:
     [[nodiscard]] Rect visual_new_tab_bounds(WindowId window, const StripLayout& strip) const;
     [[nodiscard]] float tab_hover_amount(WindowId window, TabId tab) const;
     [[nodiscard]] float new_tab_hover_amount(WindowId window) const;
+    void update_hover_card(WindowId window, TabId tab, Point client);
+    void hide_hover_card(WindowId window);
+    [[nodiscard]] Rect hover_card_bounds(WindowId window, TabId tab) const;
+    void paint_hover_card(WindowId window, SkCanvas& canvas);
     void paint(WindowId window);
     void request_destroy(WindowId window);
     void flush_destroy();

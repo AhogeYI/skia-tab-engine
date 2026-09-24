@@ -100,14 +100,61 @@ public:
     void body_event(const tabengine::Event&, tabengine::Rect) override {}
     void paint_tab_icon(tabengine::WindowId, tabengine::TabId tab, SkCanvas&,
                         tabengine::Rect bounds) override { icon_x_[tab] = bounds.x; }
+    std::string hover_card_subtitle(tabengine::WindowId, tabengine::TabId,
+                                    tabengine::ContentId) override { return "Preview"; }
+    void paint_hover_card_preview(tabengine::WindowId, tabengine::TabId,
+                                  tabengine::ContentId, SkCanvas&, tabengine::Rect) override {
+        ++preview_paints_;
+    }
     const std::vector<tabengine::ContentId>& closed() const { return closed_; }
     int icon_x(tabengine::TabId tab) const { return icon_x_.at(tab); }
+    int preview_paints() const { return preview_paints_; }
 
 private:
     tabengine::ContentId next_ = 1;
     std::vector<tabengine::ContentId> closed_;
     std::unordered_map<tabengine::TabId, int> icon_x_;
+    int preview_paints_ = 0;
 };
+
+void check_hover_card_visual() {
+    FakePlatform platform;
+    auto renderer = tabengine::make_skia_raster_renderer();
+    Client client;
+    tabengine::Shell shell(platform, *renderer, client);
+    const auto window = shell.open_window({100, 100, 900, 600});
+    const auto first = shell.model().window(window)->tabs.front().id;
+    (void)shell.new_tab(window);
+    platform.now = 0.25;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    assert(shell.select_tab(window, first));
+    const auto pixel = [&] {
+        platform.emit({tabengine::EventType::Paint, window});
+        SkPixmap pixels;
+        assert(renderer->canvas(window)->peekPixels(&pixels));
+        return pixels.getColor(250, 60);
+    };
+    const SkColor body = pixel();
+    platform.emit({tabengine::EventType::PointerMove, window, {70, 20}, {170, 120}});
+    platform.now = 0.54;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    assert(pixel() == body);
+    platform.now = 0.55;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    platform.now = 0.65;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    assert(pixel() != body);
+    platform.now = 0.76;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    platform.emit({tabengine::EventType::PointerMove, window, {320, 20}, {420, 120}});
+    platform.emit({tabengine::EventType::Paint, window});
+    assert(client.preview_paints() > 0);
+    platform.emit({tabengine::EventType::PointerMove, window, {250, 60}, {350, 160}});
+    platform.emit({tabengine::EventType::PointerLeave, window});
+    platform.now = 0.92;
+    platform.emit({tabengine::EventType::AnimationFrame, window});
+    assert(pixel() == body);
+}
 
 void check_hover_and_reorder_visual() {
     FakePlatform platform;
@@ -265,5 +312,6 @@ int main() {
     assert(client.closed().size() == 1);
     check_close_visual();
     check_hover_and_reorder_visual();
+    check_hover_card_visual();
     return 0;
 }
