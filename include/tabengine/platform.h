@@ -9,7 +9,8 @@ namespace tabengine {
 
 enum class EventType {
     Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
-    KeyDown, CloseRequested, Moving, NativeMoveEnded
+    KeyDown, CloseRequested, Moving, NativeMoveEnded,
+    WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged
 };
 
 struct Event {

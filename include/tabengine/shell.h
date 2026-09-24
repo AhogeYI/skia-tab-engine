@@ -35,6 +35,12 @@ public:
     virtual void tab_detached(WindowId, TabId, ContentId) {}
     virtual void active_tab_changed(WindowId, TabId, TabId) {}
     virtual void body_geometry_changed(WindowId, Rect, float) {}
+    virtual void window_activation_changed(WindowId, bool) {}
+    virtual void dpi_changed(WindowId, float) {}
+    // Client-area bounds in screen pixels, emitted after an interactive move or resize.
+    virtual void window_placement_changed(WindowId, Rect, float) {}
+    // Return true to consume a shortcut before TabEngine's default bindings.
+    virtual bool handle_shortcut(const Event&) { return false; }
     virtual void paint_extra_caption_button(WindowId, int, SkCanvas&, Rect, bool) {}
     virtual void extra_caption_button_pressed(WindowId, int) {}
     virtual void tab_closed(ContentId content) = 0;
@@ -76,6 +82,7 @@ private:
         Point press_screen{};
         Point grab_client{};
         Point current_screen{};
+        std::size_t original_index = 0;
     };
 
     void handle_event(const Event& event);
@@ -83,6 +90,7 @@ private:
     void handle_moving(const Event& event);
     void start_native_drag(WindowId window, Point screen);
     void finish_native_drag();
+    void cancel_drag();
     void paint(WindowId window);
     void request_destroy(WindowId window);
     void flush_destroy();

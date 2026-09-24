@@ -309,6 +309,32 @@ void Shell::handle_event(const Event& event) {
                                       platform_.scale(event.window));
         if (model_.window(event.window)) platform_.invalidate(event.window);
         break;
+    case EventType::DpiChanged:
+        renderer_.resize(event.window, platform_.client_size(event.window));
+        client_.dpi_changed(event.window, platform_.scale(event.window));
+        if (!model_.window(event.window)) break;
+        client_.body_geometry_changed(event.window, body_bounds(event.window),
+                                      platform_.scale(event.window));
+        if (model_.window(event.window)) platform_.invalidate(event.window);
+        break;
+    case EventType::WindowActivated:
+        client_.window_activation_changed(event.window, true);
+        break;
+    case EventType::WindowDeactivated:
+        if (drag_.window == event.window && drag_.phase != DragPhase::NativeWindow) {
+            cancel_drag();
+        }
+        clear_hover(event.window);
+        client_.window_activation_changed(event.window, false);
+        break;
+    case EventType::PlacementChanged: {
+        const Point origin = platform_.client_origin(event.window);
+        const Size size = platform_.client_size(event.window);
+        client_.window_placement_changed(event.window,
+                                         {origin.x, origin.y, size.width, size.height},
+                                         platform_.scale(event.window));
+        break;
+    }
     case EventType::PointerDown:
     case EventType::PointerMove:
     case EventType::PointerUp:
@@ -320,6 +346,12 @@ void Shell::handle_event(const Event& event) {
     case EventType::NativeMoveEnded: finish_native_drag(); break;
     case EventType::CloseRequested: close_window(event.window); break;
     case EventType::KeyDown: {
+        if (event.key == 27 && drag_.window == event.window &&
+            drag_.phase != DragPhase::Idle) {
+            cancel_drag();
+            break;
+        }
+        if (client_.handle_shortcut(event) || !model_.window(event.window)) break;
         if (event.ctrl && event.key == 'T') {
             (void)new_tab(event.window);
             break;
@@ -506,12 +538,13 @@ void Shell::handle_pointer(const Event& event) {
         }
         (void)select_tab(event.window, id);
         drag_ = {DragPhase::Pressed, event.window, 0, id, event.screen, event.client,
-                 event.screen};
+                 event.screen, index};
         platform_.capture_pointer(event.window);
         return;
     }
     if (event.type == EventType::CaptureLost) {
-        if (drag_.phase != DragPhase::NativeWindow) drag_ = {};
+        if (drag_.window == event.window && drag_.phase != DragPhase::NativeWindow)
+            cancel_drag();
         return;
     }
     if (event.type == EventType::PointerUp) {
@@ -609,6 +642,19 @@ void Shell::finish_native_drag() {
         (void)transfer_tab(source, target, drag_.tab, index);
     }
     drag_ = {};
+}
+
+void Shell::cancel_drag() {
+    if (drag_.phase == DragPhase::Idle) return;
+    if (drag_.phase == DragPhase::NativeWindow) {
+        platform_.end_native_move_loop(drag_.window);
+        return;
+    }
+    const Drag canceled = drag_;
+    drag_ = {};
+    if (canceled.phase == DragPhase::InStrip && model_.window(canceled.window))
+        (void)move_tab(canceled.window, canceled.tab, canceled.original_index);
+    platform_.release_pointer();
 }
 
 void Shell::paint(WindowId window) {

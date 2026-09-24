@@ -8,6 +8,7 @@ This repository is being developed independently. It does not implement an addre
 
 - Ordered tabs, active selection, metadata updates, and transfer between windows while preserving tab and content IDs.
 - Content attach/detach and active-tab notifications, body geometry updates, and vetoable tab/window closure. Transfers keep the application-owned content alive; final closure reports it once.
+- Win32 activation, DPI, and settled window placement notifications; host-first keyboard shortcut handling; Escape, capture loss, or deactivation restores an in-strip drag's original order.
 - Width adapting tab strip, selection, close and new tab controls, in strip reorder, and a Win32 native window move loop for tear off and attach.
 - Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a visual workbench application.
 - DirectWrite-backed Skia UI and caption typefaces so tab titles and controls render in the Windows build.
@@ -55,6 +56,8 @@ Try tab selection and closing, the plus button, horizontal reordering, tearing a
 `Model` owns tab presentation records and window membership. The application owns content identified by `ContentId`. `IClient` creates content, receives attach/detach/activation and body geometry callbacks, can veto tab/window closure, and controls body rendering and input. The public `Shell::move_tab` and `Shell::transfer_tab` operations route model changes through those callbacks. A transfer never calls `tab_closed`; a final close does. Reentrant structural operations on a window are rejected while a tab or window mutation callback is running. `IPlatform` owns native windows, input and move loops. `IRenderer` supplies a canvas and presents each window. The controller in `Shell` connects these contracts.
 
 `Shell::set_chrome_options` changes the application-painted leading slot and reserves up to four extra caption buttons before the system controls. The host paints and handles those buttons through `IClient`; TabEngine keeps their layout and hit testing aligned with the tab strip.
+
+`IClient::handle_shortcut` runs before the built-in Ctrl+T/W/N/Tab bindings. Activation, DPI, and settled interactive placement changes are delivered through separate `IClient` callbacks. Placement uses client-area bounds in screen pixels; `body_geometry_changed` reports the drawable area inside the window.
 
 The Windows drag path follows the responsibilities in Chromium's [TabStripModel](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/ui/tabs/tab_strip_model.h), [Views Widget](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/ui/views/overview.md), and [TabDragController](https://chromium.googlesource.com/chromium/src/+/b39ab7bc4ae0db831a930d373264e5edf8205fdc/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.h): separate model, view, native host, and drag session. It is an original implementation with no Chromium build dependency.
 

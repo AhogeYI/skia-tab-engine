@@ -313,6 +313,10 @@ private:
                                 static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0,
                                 (GetKeyState(VK_SHIFT) & 0x8000) != 0});
             return 0;
+        case WM_ACTIVATE:
+            self.emit(*native, {LOWORD(wp) == WA_INACTIVE ? EventType::WindowDeactivated
+                                                       : EventType::WindowActivated});
+            break;
         case WM_CLOSE:
             self.emit(*native, {EventType::CloseRequested});
             return 0;
@@ -327,13 +331,16 @@ private:
                 }
             }
             return TRUE;
+        case WM_EXITSIZEMOVE:
+            self.emit(*native, {EventType::PlacementChanged});
+            break;
         case WM_DPICHANGED: {
             const RECT* suggested = reinterpret_cast<const RECT*>(lp);
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
                          suggested->right - suggested->left,
                          suggested->bottom - suggested->top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            self.invalidate(native->id);
+            self.emit(*native, {EventType::DpiChanged});
             return 0;
         }
         case WM_NCDESTROY:

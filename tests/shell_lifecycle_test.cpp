@@ -22,7 +22,7 @@ public:
     void destroy(WindowId id) override { windows.erase(id); }
     void invalidate(WindowId) override {}
     void capture_pointer(WindowId) override {}
-    void release_pointer() override {}
+    void release_pointer() override { ++pointer_releases; }
     void minimize(WindowId id) override { minimized.push_back(id); }
     void toggle_maximize(WindowId) override {}
     Size client_size(WindowId id) const override {
@@ -33,17 +33,20 @@ public:
         const Rect& r = windows.at(id);
         return {r.x, r.y};
     }
-    float scale(WindowId) const override { return 1.0f; }
+    float scale(WindowId) const override { return dpi_scale; }
     void* native_handle(WindowId) const override { return nullptr; }
     WindowId window_at(Point, WindowId) const override { return 0; }
-    bool supports_native_move_loop() const override { return false; }
+    bool supports_native_move_loop() const override { return true; }
     void set_client_origin(WindowId, Point) override {}
-    void run_native_move_loop(WindowId) override {}
+    void run_native_move_loop(WindowId) override { ++native_move_loops; }
     void end_native_move_loop(WindowId) override {}
     int run() override { return 0; }
 
     std::unordered_map<WindowId, Rect> windows;
     std::vector<WindowId> minimized;
+    float dpi_scale = 1.0f;
+    int pointer_releases = 0;
+    int native_move_loops = 0;
 };
 
 class Renderer final : public IRenderer {
@@ -86,6 +89,22 @@ public:
     void body_geometry_changed(WindowId w, Rect bounds, float) override {
         body_bounds[w] = bounds;
     }
+    void window_activation_changed(WindowId w, bool active) override {
+        window_activation.emplace_back(w, active);
+    }
+    void dpi_changed(WindowId w, float scale) override {
+        dpi_events.emplace_back(w, scale);
+    }
+    void window_placement_changed(WindowId w, Rect bounds, float scale) override {
+        placement_events.emplace_back(w, bounds, scale);
+    }
+    bool handle_shortcut(const Event& event) override {
+        if (event.ctrl && event.key == 'T' && consume_new_tab_shortcut) {
+            ++consumed_shortcuts;
+            return true;
+        }
+        return false;
+    }
     void tab_closed(ContentId content) override { closed.push_back(content); }
     void extra_caption_button_pressed(WindowId window, int index) override {
         extra_caption_clicks.emplace_back(window, index);
@@ -105,6 +124,11 @@ public:
     std::vector<std::tuple<WindowId, TabId, TabId>> active_changes;
     std::unordered_map<WindowId, Rect> body_bounds;
     std::vector<std::pair<WindowId, int>> extra_caption_clicks;
+    std::vector<std::pair<WindowId, bool>> window_activation;
+    std::vector<std::pair<WindowId, float>> dpi_events;
+    std::vector<std::tuple<WindowId, Rect, float>> placement_events;
+    bool consume_new_tab_shortcut = false;
+    int consumed_shortcuts = 0;
 };
 
 } // namespace
@@ -144,11 +168,54 @@ int main() {
         assert(platform.minimized == std::vector<WindowId>({source}));
         assert(shell.model().window(source)->tabs.size() == 2);
 
+        const auto reorder_first = [&] {
+            shell.on_event({EventType::PointerDown, source, {70, 20}, {70, 20}});
+            shell.on_event({EventType::PointerMove, source, {450, 20}, {450, 20}});
+            assert(shell.model().window(source)->tabs[0].id == moved);
+            assert(shell.model().window(source)->tabs[1].id == first);
+        };
+        reorder_first();
+        shell.on_event({EventType::KeyDown, source, {}, {}, {}, 27}); // Escape
+        assert(shell.model().window(source)->tabs[0].id == first);
+        assert(shell.model().window(source)->tabs[1].id == moved);
+        reorder_first();
+        shell.on_event({EventType::CaptureLost, source});
+        assert(shell.model().window(source)->tabs[0].id == first);
+        assert(shell.model().window(source)->tabs[1].id == moved);
+
+        shell.on_event({EventType::WindowActivated, source});
+        shell.on_event({EventType::PointerDown, source, {70, 20}, {70, 20}});
+        shell.on_event({EventType::WindowDeactivated, source});
+        shell.on_event({EventType::PointerMove, source, {70, 100}, {70, 100}});
+        assert((client.window_activation == std::vector<std::pair<WindowId, bool>>(
+            {{source, true}, {source, false}})));
+        assert(platform.pointer_releases == 3);
+        assert(platform.native_move_loops == 0);
+        assert(shell.model().window_ids().size() == 2);
+        client.consume_new_tab_shortcut = true;
+        shell.on_event({EventType::KeyDown, source, {}, {}, {}, 'T', true});
+        assert(client.consumed_shortcuts == 1);
+        assert(shell.model().window(source)->tabs.size() == 2);
+        client.consume_new_tab_shortcut = false;
+
         platform.windows[source].width = 640;
         platform.windows[source].height = 480;
         shell.on_event({EventType::Resized, source, {}, {}, {640, 480}});
         assert(client.body_bounds[source].width == 640);
         assert(client.body_bounds[source].height == 439);
+        platform.dpi_scale = 1.5f;
+        shell.on_event({EventType::DpiChanged, source});
+        assert((client.dpi_events ==
+                std::vector<std::pair<WindowId, float>>({{source, 1.5f}})));
+        assert(client.body_bounds[source].y == 62);
+        assert(client.body_bounds[source].height == 418);
+        platform.windows[source].x = 123;
+        platform.windows[source].y = 234;
+        shell.on_event({EventType::PlacementChanged, source});
+        const auto& [placed_window, placed_bounds, placed_scale] = client.placement_events.back();
+        assert(placed_window == source && placed_bounds.x == 123 && placed_bounds.y == 234);
+        assert(placed_bounds.width == 640 && placed_bounds.height == 480);
+        assert(placed_scale == 1.5f);
 
         client.denied_tab = moved;
         assert(!shell.close_tab(source, moved));
