@@ -43,6 +43,8 @@ When working in the the development workspace workspace, select **TabEngine (vs-
 
 The workbench deliberately draws a toolbar, sidebar, cards, and status area in its own `IClient`. None of that product UI is in the library. The library draws the tab strip, title controls, and native window frame; `IClient` supplies tab icons, branding, body painting, and body input. The status panel shows the active renderer and surface size, making resize errors visible.
 
+Run `tabengine_win32_demo.exe --raster` to force the Skia CPU backend for visual comparison or machines without D3D12. In the development workspace, **TabEngine (raster)** is also a VS Code launch choice. The default F5 entry uses the GPU-first renderer.
+
 Try tab selection and closing, the plus button, horizontal reordering, tearing a tab into a new native window, resizing, the workbench sidebar, and **NEW TAB**. The demo starts with three tabs so these behaviors can be exercised immediately. Automated checks cover model transfer, shell drag transfer, font pixels, hidden-window rendering, and D3D12 resize while keeping its backend. The current screenshot and interaction checks were performed on Windows with the repository's local Skia Debug package; native tear-off still needs a hands-on pointer check.
 
 ## Embedding boundary

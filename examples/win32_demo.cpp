@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cwchar>
 #include <string>
 #include <unordered_map>
 
@@ -253,10 +254,12 @@ private:
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR command_line, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     auto platform = tabengine::make_win32_platform();
-    auto renderer = tabengine::make_skia_windows_renderer();
+    const bool force_raster = command_line && std::wcsstr(command_line, L"--raster");
+    auto renderer = force_raster ? tabengine::make_skia_raster_renderer()
+                                 : tabengine::make_skia_windows_renderer();
     Workbench client;
     tabengine::Shell shell(*platform, *renderer, client);
     client.bind(shell, *platform, *renderer);
