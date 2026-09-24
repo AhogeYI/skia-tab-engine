@@ -14,6 +14,7 @@ struct Theme {
     std::uint32_t tab_hover = 0xFF2A3757;
     std::uint32_t text = 0xFFD9E4FF;
     std::uint32_t text_muted = 0xFF93A1C4;
+    std::uint32_t tab_close = 0xFFAAB8D8;
     std::uint32_t separator = 0x66FFFFFF;
     std::uint32_t new_tab = 0xFF223050;
     std::uint32_t new_tab_hover = 0xFF2B3A5C;

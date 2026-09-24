@@ -29,6 +29,9 @@ struct ChromeMetrics {
     static constexpr int hover_card_width = 256;
     static constexpr int hover_card_preview_height = 144;
     static constexpr int hover_card_footer_height = 48;
+    static constexpr int drag_start_slop = 4;
+    static constexpr int drag_reorder_threshold = 16;
+    static constexpr int drag_leading_width = 16;
 };
 
 } // namespace tabengine::detail

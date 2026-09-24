@@ -11,6 +11,7 @@ Theme Theme::light() {
     theme.tab_hover = 0xFFF0F6FF;
     theme.text = 0xFF2B3656;
     theme.text_muted = 0xFF5E6B8C;
+    theme.tab_close = 0xFF5E6B8C;
     theme.separator = 0x332B3656;
     theme.new_tab = 0xFFDCE9FB;
     theme.new_tab_hover = 0xFFCFE0F8;

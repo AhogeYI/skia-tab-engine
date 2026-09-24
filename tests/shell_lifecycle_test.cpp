@@ -234,6 +234,8 @@ int main() {
 
         const auto reorder_first = [&] {
             shell.on_event({EventType::PointerDown, source, {70, 20}, {70, 20}});
+            shell.on_event({EventType::PointerMove, source, {80, 20}, {80, 20}});
+            assert(shell.model().window(source)->tabs[0].id == first);
             shell.on_event({EventType::PointerMove, source, {450, 20}, {450, 20}});
             assert(shell.model().window(source)->tabs[0].id == moved);
             assert(shell.model().window(source)->tabs[1].id == first);

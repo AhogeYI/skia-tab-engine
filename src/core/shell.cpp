@@ -1033,7 +1033,8 @@ void Shell::handle_pointer(const Event& event) {
         }
         (void)select_tab(event.window, id);
         drag_ = {DragPhase::Pressed, event.window, event.window, 0, id, event.screen,
-                 event.client, event.screen, index, event.client.x - rect.x};
+                 event.client, event.screen, index, event.client.x - rect.x,
+                 event.client.x};
         platform_.capture_pointer(event.window);
         return;
     }
@@ -1065,7 +1066,8 @@ void Shell::handle_pointer(const Event& event) {
     }
     const int dx = event.screen.x - drag_.press_screen.x;
     const int dy = event.screen.y - drag_.press_screen.y;
-    const int slop = static_cast<int>(std::lround(6.0f * platform_.scale(event.window)));
+    const int slop = static_cast<int>(std::lround(
+        detail::ChromeMetrics::drag_start_slop * platform_.scale(event.window)));
     if (drag_.phase == DragPhase::Pressed && dx * dx + dy * dy > slop * slop) {
         drag_.phase = DragPhase::InStrip;
         clear_hover(event.window);
@@ -1084,7 +1086,18 @@ void Shell::handle_pointer(const Event& event) {
                            [this](const Tab& tab) { return tab.id == drag_.tab; });
     if (it == w->tabs.end()) return;
     const std::size_t from = static_cast<std::size_t>(it - w->tabs.begin());
-    const std::size_t to = Layout::insertion_index(strip, event.client.x, from);
+    const double width_ratio = std::min(1.0,
+        static_cast<double>(strip.tabs[from].width) /
+        std::max(1.0, detail::ChromeMetrics::standard_tab_width *
+                      static_cast<double>(platform_.scale(event.window))));
+    const int threshold = std::max(1, static_cast<int>(width_ratio *
+        detail::ChromeMetrics::drag_reorder_threshold * platform_.scale(event.window)));
+    if (std::abs(event.client.x - drag_.last_reorder_x) <= threshold) return;
+    drag_.last_reorder_x = event.client.x;
+    const int leading = static_cast<int>(std::lround(
+        detail::ChromeMetrics::drag_leading_width * platform_.scale(event.window)));
+    const std::size_t to = Layout::insertion_index(
+        strip, event.client.x - drag_.grab_tab_x + leading, from);
     if (from != to) (void)move_tab(event.window, drag_.tab, to);
 }
 
@@ -1246,12 +1259,9 @@ void Shell::paint(WindowId window) {
             r.width >= static_cast<int>(detail::ChromeMetrics::close_hide_width * scale)) {
             const float cx = r.right() - 25 * scale;
             const float cy = r.y + r.height * 0.5f;
-            if (hover_window_ == window && hover_close_ == tab.id) {
-                paint.setColor(theme_.tab_hover);
-                canvas->drawCircle(cx, cy, 11 * scale, paint);
-            }
             paint_caption_symbol(*canvas, "\xEE\xA2\xBB", cx, cy, 10 * scale,
-                                 active ? theme_.text_muted : theme_.text);
+                                 hover_window_ == window && hover_close_ == tab.id ?
+                                     theme_.text : theme_.tab_close);
         }
     };
     for (std::size_t i = 0; i < w->tabs.size(); ++i) {
@@ -1283,8 +1293,8 @@ void Shell::paint(WindowId window) {
     paint.setColor(blend_color(theme_.new_tab, theme_.new_tab_hover,
                                new_tab_hover_amount(window)));
     canvas->drawRoundRect(skrect(new_tab), 14 * scale, 14 * scale, paint);
-    text(*canvas, "+", new_tab.x + 7 * scale, new_tab.y + 21 * scale,
-         20 * scale, theme_.text);
+    paint_caption_symbol(*canvas, "\xEE\x9C\x90", new_tab.x + new_tab.width * 0.5f,
+                         new_tab.y + new_tab.height * 0.5f, 16 * scale, theme_.text);
     canvas->restore();
 
     constexpr const char* symbols[] = {"\xEE\xA4\xA1", "\xEE\xA4\xA2", "\xEE\xA2\xBB"};
