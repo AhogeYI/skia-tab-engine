@@ -50,7 +50,7 @@ private:
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     auto platform = tabengine::make_win32_platform();
-    auto renderer = tabengine::make_skia_raster_renderer();
+    auto renderer = tabengine::make_skia_windows_renderer();
     DemoClient client;
     tabengine::Shell shell(*platform, *renderer, client);
     const tabengine::WindowId window = shell.open_window();
@@ -59,4 +59,3 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     (void)shell.new_tab(window);
     return platform->run();
 }
-

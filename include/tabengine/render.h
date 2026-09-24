@@ -22,5 +22,8 @@ public:
 // copies Skia's raster pixels into a Win32 window for presentation.
 [[nodiscard]] std::unique_ptr<IRenderer> make_skia_raster_renderer();
 
-} // namespace tabengine
+// Windows host: Skia Ganesh/D3D12 flip swapchain when available, with a
+// Skia raster fallback for machines where GPU initialization fails.
+[[nodiscard]] std::unique_ptr<IRenderer> make_skia_windows_renderer();
 
+} // namespace tabengine

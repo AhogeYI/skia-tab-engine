@@ -8,10 +8,10 @@ This repository is being developed independently. It does not implement an addre
 
 - Ordered tabs, active selection, metadata updates, and transfer between windows while preserving tab and content IDs.
 - Width adapting tab strip, selection, close and new tab controls, in strip reorder, and a Win32 native window move loop for tear off and attach.
-- Custom Win32 frame with resize and caption hit testing; a Skia raster reference renderer; a small demo application.
-- Headless core and shell tests. The core can be configured without Skia on other platforms.
+- Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a small demo application.
+- Headless core and shell tests, plus a hidden-HWND renderer smoke test. The core can be configured without Skia on other platforms.
 
-The Windows renderer uses Skia for all artwork and copies the raster result to the window with `StretchDIBits`. GPU presentation, full drag animation, keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
+The Windows demo now presents Skia drawings through D3D12 when a suitable hardware adapter and swapchain are available. If initialization or presentation fails, it uses Skia raster pixels via `StretchDIBits`. Full drag animation, keyboard focus/IME, accessibility, touch, pinned tabs, tab groups, and non-Windows backends are still future work. The current API promises source compatibility only; no binary ABI is specified.
 
 ## Build
 
@@ -29,11 +29,13 @@ Windows demo and shell test:
 cmake -S . -B build/windows -G "Visual Studio 18 2026" -A x64 `
   -DTABENGINE_BUILD_WIN32_DEMO=ON `
   -DTABENGINE_SKIA_ROOT=<path-to-skia-package>
-cmake --build build/windows --config Debug --target tabengine_win32_demo tabengine_shell_test
+cmake --build build/windows --config Debug --target tabengine_win32_demo tabengine_shell_test tabengine_windows_renderer_test
 ctest --test-dir build/windows -C Debug --output-on-failure
 ```
 
 The Skia package must contain `include/` and `lib/skia.lib`. The package used for the initial Windows build is a local MSVC Debug package; TabEngine does not import any external product code or CMake configuration. The demo executable is `build/windows/Debug/tabengine_win32_demo.exe` for the command above.
+
+When working in the the development workspace workspace, select **TabEngine (vs-debug)** in VS Code's Run and Debug menu and press F5. Its pre-launch task configures and builds the demo in `tab-engine/build/vs-debug` using the workspace's Skia package.
 
 ## Embedding boundary
 
