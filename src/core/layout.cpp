@@ -9,13 +9,16 @@ namespace {
 int px(float dp, float scale) { return static_cast<int>(std::lround(dp * std::max(scale, 0.5f))); }
 }
 
-StripLayout Layout::tab_strip(int width_px, std::size_t count, float scale) {
+StripLayout Layout::tab_strip(int width_px, std::size_t count, float scale,
+                              ChromeOptions options) {
     using M = detail::ChromeMetrics;
     StripLayout out;
     out.height = px(M::strip_height, scale);
-    const int leading = px(M::leading_slot, scale);
-    const int caption_width = px(M::caption_button_width * M::caption_button_count +
-                                 M::caption_button_spacing * (M::caption_button_count - 1), scale);
+    const int leading = px(std::clamp(options.leading_slot_width_dp, 0, 256), scale);
+    out.extra_caption_buttons = std::clamp(options.extra_caption_buttons, 0, 4);
+    out.caption_button_count = M::caption_button_count + out.extra_caption_buttons;
+    const int caption_width = px(M::caption_button_width * out.caption_button_count +
+                                 M::caption_button_spacing * (out.caption_button_count - 1), scale);
     const int strip_width = std::max(0, width_px - caption_width);
     out.caption_start = strip_width;
     out.leading_slot = {0, 0, leading, out.height};

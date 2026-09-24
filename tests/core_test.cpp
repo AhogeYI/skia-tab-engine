@@ -46,5 +46,12 @@ int main() {
     assert(scaled.leading_slot.width == 45);
     assert(scaled.tabs[1].x == scaled.tabs[0].right() - 23);
     assert(scaled.new_tab.x == scaled.tabs.back().right() - 15 + 8);
+    const auto custom = tabengine::Layout::tab_strip(1000, 3, 1.0f, {64, 1});
+    assert(custom.leading_slot.width == 64);
+    assert(custom.extra_caption_buttons == 1);
+    assert(custom.caption_button_count == 4);
+    assert(custom.caption_start == 817); // Four 45dp buttons and three 1dp gaps.
+    assert(custom.tabs.front().x == 64);
+    assert(custom.new_tab.x == custom.tabs.back().right() - 6);
     return 0;
 }

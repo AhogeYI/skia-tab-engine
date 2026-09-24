@@ -8,7 +8,6 @@ struct ChromeMetrics {
     static constexpr int strip_height = 41;
     static constexpr int strip_padding = 6;
     static constexpr int tab_height = 35;
-    static constexpr int leading_slot = 36;
     static constexpr int top_radius = 10;
     static constexpr int bottom_radius = 12;
     static constexpr int overlap = 18;

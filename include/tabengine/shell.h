@@ -35,6 +35,8 @@ public:
     virtual void tab_detached(WindowId, TabId, ContentId) {}
     virtual void active_tab_changed(WindowId, TabId, TabId) {}
     virtual void body_geometry_changed(WindowId, Rect, float) {}
+    virtual void paint_extra_caption_button(WindowId, int, SkCanvas&, Rect, bool) {}
+    virtual void extra_caption_button_pressed(WindowId, int) {}
     virtual void tab_closed(ContentId content) = 0;
     virtual void paint_body(WindowId window, TabId active, SkCanvas& canvas, Rect body) = 0;
     virtual void body_event(const Event& event, Rect body) = 0;
@@ -62,6 +64,7 @@ public:
     void on_event(const Event& event);
     [[nodiscard]] const Model& model() const { return model_; }
     void set_theme(Theme theme);
+    void set_chrome_options(ChromeOptions options);
 
 private:
     enum class DragPhase { Idle, Pressed, InStrip, NativeWindow };
@@ -97,6 +100,7 @@ private:
     IClient& client_;
     Model model_;
     Theme theme_;
+    ChromeOptions chrome_options_;
     WindowId hover_window_ = 0;
     TabId hover_tab_ = 0;
     TabId hover_close_ = 0;

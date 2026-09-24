@@ -94,6 +94,11 @@ void Shell::set_theme(Theme theme) {
     for (WindowId id : model_.window_ids()) platform_.invalidate(id);
 }
 
+void Shell::set_chrome_options(ChromeOptions options) {
+    chrome_options_ = options;
+    for (WindowId id : model_.window_ids()) platform_.invalidate(id);
+}
+
 WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
     const WindowId id = model_.create_window();
     if (!platform_.create(id, bounds, "Tabbed Window", false)) {
@@ -354,7 +359,7 @@ void Shell::handle_event(const Event& event) {
 StripLayout Shell::layout(WindowId window) const {
     const auto* w = model_.window(window);
     return Layout::tab_strip(platform_.client_size(window).width, w ? w->tabs.size() : 0,
-                             platform_.scale(window));
+                             platform_.scale(window), chrome_options_);
 }
 
 Rect Shell::body_bounds(WindowId window) const {
@@ -421,7 +426,7 @@ void Shell::update_hover(WindowId window, Point client) {
     int caption = -1;
     if (client.y >= 0 && client.y < strip.height) {
         if (client.x >= caption_start) {
-            for (int i = 0; i < detail::ChromeMetrics::caption_button_count; ++i) {
+            for (int i = 0; i < strip.caption_button_count; ++i) {
                 if (caption_button(strip, i, scale).contains(client)) caption = i;
             }
         } else if (strip.new_tab.contains(client)) {
@@ -463,14 +468,20 @@ void Shell::handle_pointer(const Event& event) {
         }
         const int caption_start = strip.caption_start;
         if (event.client.x >= caption_start) {
-            int button = 2;
-            for (int i = 0; i < detail::ChromeMetrics::caption_button_count; ++i) {
+            int button = -1;
+            for (int i = 0; i < strip.caption_button_count; ++i) {
                 if (caption_button(strip, i, platform_.scale(event.window)).contains(event.client))
                     button = i;
             }
-            if (button == 0) platform_.minimize(event.window);
-            else if (button == 1) platform_.toggle_maximize(event.window);
-            else close_window(event.window);
+            if (button < 0) return;
+            if (button < strip.extra_caption_buttons) {
+                client_.extra_caption_button_pressed(event.window, button);
+            } else {
+                const int system_button = button - strip.extra_caption_buttons;
+                if (system_button == 0) platform_.minimize(event.window);
+                else if (system_button == 1) platform_.toggle_maximize(event.window);
+                else close_window(event.window);
+            }
             return;
         }
         if (strip.new_tab.contains(event.client)) {
@@ -685,17 +696,24 @@ void Shell::paint(WindowId window) {
     canvas->restore();
 
     constexpr const char* symbols[] = {"\xEE\xA4\xA1", "\xEE\xA4\xA2", "\xEE\xA2\xBB"};
-    for (int i = 0; i < detail::ChromeMetrics::caption_button_count; ++i) {
+    for (int i = 0; i < strip.caption_button_count; ++i) {
         const Rect button = caption_button(strip, i, scale);
-        const float x = static_cast<float>(button.x + (i ? static_cast<int>(scale) : 0));
-        const float width = static_cast<float>(button.width - (i ? static_cast<int>(scale) : 0));
-        if (hover_window_ == window && hover_caption_ == i) {
-            paint.setColor(i == 2 ? theme_.caption_close_hover : theme_.caption_hover);
-            canvas->drawRect(SkRect::MakeXYWH(x, 0, width,
-                                               static_cast<float>(strip.height)), paint);
+        const int inset = i ? static_cast<int>(std::lround(
+            detail::ChromeMetrics::caption_button_spacing * scale)) : 0;
+        const Rect face{button.x + inset, button.y, button.width - inset, button.height};
+        const bool hovered = hover_window_ == window && hover_caption_ == i;
+        if (hovered) {
+            paint.setColor(i == strip.extra_caption_buttons + 2 ?
+                           theme_.caption_close_hover : theme_.caption_hover);
+            canvas->drawRect(skrect(face), paint);
         }
-        paint_caption_symbol(*canvas, symbols[i], x + width * 0.5f,
-                             strip.height * 0.5f, 12 * scale, theme_.text);
+        if (i < strip.extra_caption_buttons) {
+            client_.paint_extra_caption_button(window, i, *canvas, face, hovered);
+        } else {
+            paint_caption_symbol(*canvas, symbols[i - strip.extra_caption_buttons],
+                                 face.x + face.width * 0.5f,
+                                 strip.height * 0.5f, 12 * scale, theme_.text);
+        }
     }
     const Rect body{0, strip.height, size.width, std::max(0, size.height - strip.height)};
     canvas->save();

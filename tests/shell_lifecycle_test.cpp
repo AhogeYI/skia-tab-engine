@@ -23,7 +23,7 @@ public:
     void invalidate(WindowId) override {}
     void capture_pointer(WindowId) override {}
     void release_pointer() override {}
-    void minimize(WindowId) override {}
+    void minimize(WindowId id) override { minimized.push_back(id); }
     void toggle_maximize(WindowId) override {}
     Size client_size(WindowId id) const override {
         const Rect& r = windows.at(id);
@@ -43,6 +43,7 @@ public:
     int run() override { return 0; }
 
     std::unordered_map<WindowId, Rect> windows;
+    std::vector<WindowId> minimized;
 };
 
 class Renderer final : public IRenderer {
@@ -86,6 +87,9 @@ public:
         body_bounds[w] = bounds;
     }
     void tab_closed(ContentId content) override { closed.push_back(content); }
+    void extra_caption_button_pressed(WindowId window, int index) override {
+        extra_caption_clicks.emplace_back(window, index);
+    }
     void paint_body(WindowId, TabId, SkCanvas&, Rect) override {}
     void body_event(const Event&, Rect) override {}
 
@@ -100,6 +104,7 @@ public:
     std::vector<ContentId> closed;
     std::vector<std::tuple<WindowId, TabId, TabId>> active_changes;
     std::unordered_map<WindowId, Rect> body_bounds;
+    std::vector<std::pair<WindowId, int>> extra_caption_clicks;
 };
 
 } // namespace
@@ -111,6 +116,7 @@ int main() {
     {
         Shell shell(platform, renderer, client);
         client.shell = &shell;
+        shell.set_chrome_options({36, 1});
         const WindowId source = shell.open_window({0, 0, 900, 600});
         const TabId first = shell.model().window(source)->active;
         const ContentId first_content = shell.model().window(source)->tabs.front().content;
@@ -128,6 +134,15 @@ int main() {
         assert(client.active_changes[0] == std::make_tuple(source, TabId{0}, first));
         assert(client.active_changes[1] == std::make_tuple(source, first, moved));
         assert(client.active_changes[2] == std::make_tuple(target, TabId{0}, target_tab));
+        const auto chrome = Layout::tab_strip(900, 2, 1.0f, {36, 1});
+        shell.on_event({EventType::PointerDown, source,
+                        {chrome.caption_start + 20, 20}});
+        assert((client.extra_caption_clicks ==
+                std::vector<std::pair<WindowId, int>>({{source, 0}})));
+        shell.on_event({EventType::PointerDown, source,
+                        {chrome.caption_start + 67, 20}});
+        assert(platform.minimized == std::vector<WindowId>({source}));
+        assert(shell.model().window(source)->tabs.size() == 2);
 
         platform.windows[source].width = 640;
         platform.windows[source].height = 480;
