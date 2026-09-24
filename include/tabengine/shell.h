@@ -84,6 +84,7 @@ private:
         Point grab_client{};
         Point current_screen{};
         std::size_t original_index = 0;
+        int grab_tab_x = 0;
         bool cancel_requested = false;
     };
 

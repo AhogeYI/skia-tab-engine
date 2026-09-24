@@ -63,4 +63,25 @@ std::size_t Layout::insertion_index(const StripLayout& layout, int x,
     return index;
 }
 
+DragVisual Layout::drag_visual(const StripLayout& layout, std::size_t dragged_index,
+                               int pointer_x, int grab_x, float scale) {
+    if (dragged_index >= layout.tabs.size()) return {{}, layout.new_tab};
+    using M = detail::ChromeMetrics;
+    Rect dragged = layout.tabs[dragged_index];
+    const int reserved = px(M::new_tab_size - M::bottom_radius + M::strip_padding, scale);
+    const int max_x = std::max(0, layout.caption_start - reserved - dragged.width);
+    const int min_x = std::min(layout.leading_slot.right(), max_x);
+    dragged.x = std::clamp(pointer_x - grab_x, min_x, max_x);
+
+    int right = dragged.right();
+    for (std::size_t i = 0; i < layout.tabs.size(); ++i) {
+        if (i != dragged_index) right = std::max(right, layout.tabs[i].right());
+    }
+    Rect new_tab = layout.new_tab;
+    new_tab.x = std::clamp(right - px(M::bottom_radius, scale) +
+                               px(M::strip_padding, scale),
+                           0, std::max(0, layout.caption_start - new_tab.width));
+    return {dragged, new_tab};
+}
+
 } // namespace tabengine

@@ -1,6 +1,7 @@
 #include "tabengine/shell.h"
 
 #include "include/core/SkCanvas.h"
+#include "include/core/SkPixmap.h"
 
 #include <algorithm>
 #include <cassert>
@@ -30,7 +31,7 @@ public:
         }
     }
     void destroy(tabengine::WindowId id) override { windows_.erase(id); }
-    void invalidate(tabengine::WindowId) override {}
+    void invalidate(tabengine::WindowId) override { ++invalidations_; }
     void capture_pointer(tabengine::WindowId id) override { captured_ = id; }
     void release_pointer() override { captured_ = 0; }
     void minimize(tabengine::WindowId) override {}
@@ -72,6 +73,7 @@ public:
         windows_.at(id).height = size.height;
     }
     bool ended() const { return ended_; }
+    int invalidations() const { return invalidations_; }
 
 private:
     std::unordered_map<tabengine::WindowId, tabengine::Rect> windows_;
@@ -79,6 +81,7 @@ private:
     tabengine::WindowId attach_target_ = 0;
     tabengine::Point attach_point_{};
     bool ended_ = false;
+    int invalidations_ = 0;
     tabengine::WindowId captured_ = 0;
 };
 
@@ -111,6 +114,25 @@ int main() {
     (void)shell.new_tab(source);
     const auto target = shell.open_window({500, 100, 900, 600});
     platform.attach_to(target, {550, 120});
+
+    const auto pixel_at = [&](int x, int y) {
+        platform.emit({tabengine::EventType::Paint, source});
+        SkPixmap pixels;
+        assert(renderer->canvas(source)->peekPixels(&pixels));
+        return pixels.getColor(x, y);
+    };
+    platform.emit({tabengine::EventType::PointerDown, source, {70, 20}, {170, 120}});
+    const SkColor settled = pixel_at(290, 15);
+    const int before_move = platform.invalidations();
+    platform.emit({tabengine::EventType::PointerMove, source, {90, 20}, {190, 120}});
+    assert(platform.invalidations() > before_move);
+    assert(shell.model().window(source)->tabs.front().id == moving_tab);
+    const SkColor following = pixel_at(290, 15);
+    assert(following != settled);
+    const int before_release = platform.invalidations();
+    platform.emit({tabengine::EventType::PointerUp, source, {90, 20}, {190, 120}});
+    assert(platform.invalidations() > before_release);
+    assert(pixel_at(290, 15) == settled);
 
     platform.emit({tabengine::EventType::PointerDown, source, {70, 20}, {170, 120}});
     platform.emit({tabengine::EventType::PointerMove, source, {70, 100}, {170, 200}});

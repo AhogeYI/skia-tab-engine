@@ -490,7 +490,8 @@ void Shell::handle_pointer(const Event& event) {
         return;
     }
     const auto strip = layout(event.window);
-    if (event.type == EventType::PointerMove) update_hover(event.window, event.client);
+    if (event.type == EventType::PointerMove && drag_.phase == DragPhase::Idle)
+        update_hover(event.window, event.client);
     if (event.type == EventType::PointerDown) {
         if (event.client.y >= strip.height) {
             client_.body_event(event, {0, strip.height, event.size.width,
@@ -537,7 +538,7 @@ void Shell::handle_pointer(const Event& event) {
         }
         (void)select_tab(event.window, id);
         drag_ = {DragPhase::Pressed, event.window, event.window, 0, id, event.screen,
-                 event.client, event.screen, index};
+                 event.client, event.screen, index, event.client.x - rect.x};
         platform_.capture_pointer(event.window);
         return;
     }
@@ -547,6 +548,7 @@ void Shell::handle_pointer(const Event& event) {
         return;
     }
     if (event.type == EventType::PointerUp) {
+        const bool was_dragging = drag_.phase == DragPhase::InStrip;
         if (drag_.phase == DragPhase::Idle && event.client.y >= strip.height) {
             client_.body_event(event, {0, strip.height, event.size.width,
                                        event.size.height - strip.height});
@@ -554,6 +556,7 @@ void Shell::handle_pointer(const Event& event) {
         if (drag_.phase != DragPhase::NativeWindow) {
             drag_ = {};
             platform_.release_pointer();
+            if (was_dragging) platform_.invalidate(event.window);
         }
         return;
     }
@@ -567,8 +570,10 @@ void Shell::handle_pointer(const Event& event) {
     const int dx = event.screen.x - drag_.press_screen.x;
     const int dy = event.screen.y - drag_.press_screen.y;
     const int slop = static_cast<int>(std::lround(6.0f * platform_.scale(event.window)));
-    if (drag_.phase == DragPhase::Pressed && dx * dx + dy * dy > slop * slop)
+    if (drag_.phase == DragPhase::Pressed && dx * dx + dy * dy > slop * slop) {
         drag_.phase = DragPhase::InStrip;
+        clear_hover(event.window);
+    }
     if (drag_.phase != DragPhase::InStrip) return;
     drag_.current_screen = event.screen;
 
@@ -578,6 +583,7 @@ void Shell::handle_pointer(const Event& event) {
         start_native_drag(event.window, event.screen);
         return;
     }
+    platform_.invalidate(event.window);
     auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
                            [this](const Tab& tab) { return tab.id == drag_.tab; });
     if (it == w->tabs.end()) return;
@@ -661,8 +667,10 @@ void Shell::cancel_drag() {
     }
     const Drag canceled = drag_;
     drag_ = {};
-    if (canceled.phase == DragPhase::InStrip && model_.window(canceled.window))
+    if (canceled.phase == DragPhase::InStrip && model_.window(canceled.window)) {
         (void)move_tab(canceled.window, canceled.tab, canceled.original_index);
+        platform_.invalidate(canceled.window);
+    }
     platform_.release_pointer();
 }
 
@@ -678,6 +686,21 @@ void Shell::paint(WindowId window) {
     if (!canvas) return;
     const float scale = platform_.scale(window);
     const StripLayout strip = layout(window);
+    const bool dragging = drag_.phase == DragPhase::InStrip && drag_.window == window;
+    std::size_t dragged_index = strip.tabs.size();
+    if (dragging) {
+        for (std::size_t i = 0; i < w->tabs.size(); ++i) {
+            if (w->tabs[i].id == drag_.tab) {
+                dragged_index = i;
+                break;
+            }
+        }
+    }
+    const Point origin = dragging ? platform_.client_origin(window) : Point{};
+    const DragVisual drag_visual = dragging
+        ? Layout::drag_visual(strip, dragged_index,
+                              drag_.current_screen.x - origin.x, drag_.grab_tab_x, scale)
+        : DragVisual{};
     const int caption_start = strip.caption_start;
     canvas->clear(theme_.body);
     SkPaint paint;
@@ -692,7 +715,7 @@ void Shell::paint(WindowId window) {
 
     const auto paint_tab = [&](std::size_t i) {
         const Tab& tab = w->tabs[i];
-        const Rect r = strip.tabs[i];
+        const Rect r = dragging && i == dragged_index ? drag_visual.tab : strip.tabs[i];
         const bool active = tab.id == w->active;
         paint.setColor(active ? theme_.tab_active
                               : tab.id == hover_tab_ ? theme_.tab_hover : theme_.tab_inactive);
@@ -726,10 +749,11 @@ void Shell::paint(WindowId window) {
         }
     };
     for (std::size_t i = 0; i < w->tabs.size(); ++i) {
-        if (w->tabs[i].id != w->active) paint_tab(i);
+        if (w->tabs[i].id != w->active && i != dragged_index) paint_tab(i);
     }
     for (std::size_t i = 0; i + 1 < w->tabs.size(); ++i) {
-        if (w->tabs[i].id == w->active || w->tabs[i + 1].id == w->active) continue;
+        if (w->tabs[i].id == w->active || w->tabs[i + 1].id == w->active ||
+            i == dragged_index || i + 1 == dragged_index) continue;
         const Rect r = strip.tabs[i];
         paint.setColor(theme_.separator);
         canvas->drawRoundRect(SkRect::MakeXYWH(
@@ -741,12 +765,14 @@ void Shell::paint(WindowId window) {
                               scale, scale, paint);
     }
     for (std::size_t i = 0; i < w->tabs.size(); ++i) {
-        if (w->tabs[i].id == w->active) paint_tab(i);
+        if (w->tabs[i].id == w->active && i != dragged_index) paint_tab(i);
     }
+    if (dragged_index < w->tabs.size()) paint_tab(dragged_index);
+    const Rect new_tab = dragging ? drag_visual.new_tab : strip.new_tab;
     paint.setColor(hover_window_ == window && hover_new_tab_ ?
                    theme_.new_tab_hover : theme_.new_tab);
-    canvas->drawRoundRect(skrect(strip.new_tab), 14 * scale, 14 * scale, paint);
-    text(*canvas, "+", strip.new_tab.x + 7 * scale, strip.new_tab.y + 21 * scale,
+    canvas->drawRoundRect(skrect(new_tab), 14 * scale, 14 * scale, paint);
+    text(*canvas, "+", new_tab.x + 7 * scale, new_tab.y + 21 * scale,
          20 * scale, theme_.text);
     canvas->restore();
 
