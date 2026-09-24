@@ -9,7 +9,7 @@ namespace tabengine {
 
 enum class EventType {
     Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
-    KeyDown, TextInput, CloseRequested, Moving,
+    KeyDown, TextInput, PointerWheel, CloseRequested, Moving,
     WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged,
     AnimationFrame
 };
@@ -30,6 +30,9 @@ struct Event {
     // never shortcuts: Shell forwards TextInput straight to IClient::body_event
     // without the handle_shortcut hook or the engine's default key bindings.
     char32_t code_point = 0;
+    // PointerWheel only: signed vertical wheel delta in native units (+120 per
+    // notch on Windows). The position fields carry the wheel's client point.
+    int wheel = 0;
 };
 
 // UTF-16 backends receive an astral character as a high + low surrogate pair

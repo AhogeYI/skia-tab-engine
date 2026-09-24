@@ -484,6 +484,15 @@ void Shell::handle_event(const Event& event) {
                                    std::max(0, event.size.height - strip.height)});
         break;
     }
+    case EventType::PointerWheel: {
+        // The tab strip has nothing to scroll; wheels always belong to the
+        // body. A drag stays in its pointer-capture flow.
+        if (!model_.window(event.window)) break;
+        const auto strip = layout(event.window);
+        client_.body_event(event, {0, strip.height, event.size.width,
+                                   std::max(0, event.size.height - strip.height)});
+        break;
+    }
     case EventType::CloseRequested: close_window(event.window); break;
     case EventType::KeyDown: {
         if (event.key == 27 && drag_.window == event.window &&

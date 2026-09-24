@@ -349,6 +349,21 @@ private:
             native->tracking_mouse = false;
             self.emit(*native, {EventType::PointerLeave});
             return 0;
+        case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL: {
+            // The wheel is delivered to the focused window with screen
+            // coordinates; the body needs the client point.
+            POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &screen);
+            if (message == WM_MOUSEHWHEEL) return 0; // horizontal wheels: none yet
+            Event wheel;
+            wheel.type = EventType::PointerWheel;
+            wheel.client = {screen.x, screen.y};
+            wheel.screen = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            wheel.wheel = GET_WHEEL_DELTA_WPARAM(wp);
+            self.emit(*native, wheel);
+            return 0;
+        }
         case WM_CAPTURECHANGED:
             self.emit(*native, {EventType::CaptureLost});
             return 0;

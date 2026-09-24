@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <array>
 #include <vector>
 
 namespace {
@@ -83,6 +84,9 @@ public:
         if (event.type == EventType::KeyDown && event.alt && event.key == VK_LEFT_KEY) {
             ++alt_left;
         }
+        if (event.type == EventType::PointerWheel) {
+            wheels.push_back({event.wheel, event.client.x, event.client.y});
+        }
     }
 
     static constexpr int VK_LEFT_KEY = 0x25;
@@ -91,6 +95,7 @@ public:
     int alt_left = 0;
     int body_height = 0;
     std::vector<char32_t> received;
+    std::vector<std::array<int, 3>> wheels;
 };
 
 void check_composer_pairs_astral() {
@@ -157,6 +162,33 @@ void check_shell_drops_text_for_unknown_window() {
     assert(client.received.empty());
 }
 
+// Wheels always belong to the body, with the client point carried along.
+void check_shell_forwards_wheel_to_body() {
+    Platform platform;
+    Renderer renderer;
+    Client client;
+    Shell shell(platform, renderer, client);
+    const WindowId window = shell.open_window({100, 100, 900, 600});
+
+    Event up;
+    up.type = EventType::PointerWheel;
+    up.window = window;
+    up.client = {130, 220};
+    up.wheel = 120;
+    platform.emit(up);
+    Event down;
+    down.type = EventType::PointerWheel;
+    down.window = window;
+    down.client = {140, 240};
+    down.wheel = -240;
+    platform.emit(down);
+
+    assert(client.wheels.size() == 2);
+    assert(client.wheels[0][0] == 120 && client.wheels[0][1] == 130);
+    assert(client.wheels[1][0] == -240 && client.wheels[1][2] == 240);
+    assert(client.shortcuts == 0);
+}
+
 } // namespace
 
 int main() {
@@ -166,5 +198,6 @@ int main() {
     check_composer_dangling_high_dropped();
     check_shell_forwards_text_to_body();
     check_shell_drops_text_for_unknown_window();
+    check_shell_forwards_wheel_to_body();
     return 0;
 }
