@@ -187,7 +187,7 @@ void Shell::set_chrome_options(ChromeOptions options) {
 
 WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
     const WindowId id = model_.create_window();
-    if (!platform_.create(id, bounds, "Tabbed Window", false)) {
+    if (!platform_.create(id, bounds, client_.window_title(), false)) {
         (void)model_.remove_window(id);
         return 0;
     }

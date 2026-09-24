@@ -19,8 +19,9 @@ public:
         handler_ = std::move(handler);
     }
     void set_caption_hit_handler(std::function<bool(tabengine::WindowId, tabengine::Point)>) override {}
-    bool create(tabengine::WindowId id, tabengine::Rect bounds, std::string_view, bool) override {
+    bool create(tabengine::WindowId id, tabengine::Rect bounds, std::string_view title, bool) override {
         windows_.emplace(id, bounds);
+        titles_[id] = title;
         return true;
     }
     void show(tabengine::WindowId id) override {
@@ -76,10 +77,12 @@ public:
     }
     bool ended() const { return ended_; }
     int invalidations() const { return invalidations_; }
+    const std::string& title(tabengine::WindowId id) const { return titles_.at(id); }
     double now = 0.0;
 
 private:
     std::unordered_map<tabengine::WindowId, tabengine::Rect> windows_;
+    std::unordered_map<tabengine::WindowId, std::string> titles_;
     std::function<void(const tabengine::Event&)> handler_;
     tabengine::WindowId attach_target_ = 0;
     tabengine::Point attach_point_{};
@@ -95,6 +98,7 @@ public:
         const auto id = next_++;
         return {id, "Tab " + std::to_string(id)};
     }
+    std::string window_title() override { return "Test Product"; }
     void tab_closed(tabengine::ContentId id) override { closed_.push_back(id); }
     void paint_body(tabengine::WindowId, tabengine::TabId, SkCanvas&, tabengine::Rect) override {}
     void body_event(const tabengine::Event&, tabengine::Rect) override {}
@@ -129,6 +133,7 @@ void check_hover_paint_order() {
     Client client;
     tabengine::Shell shell(platform, *renderer, client);
     const auto window = shell.open_window({100, 100, 900, 600});
+    assert(platform.title(window) == "Test Product");
     const auto first = shell.model().window(window)->tabs.front().id;
     const auto second = shell.new_tab(window);
     const auto active = shell.new_tab(window);

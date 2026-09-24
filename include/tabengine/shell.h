@@ -26,6 +26,8 @@ class IClient {
 public:
     virtual ~IClient() = default;
     [[nodiscard]] virtual NewTab create_tab() = 0;
+    // Used for every native window, including windows created by tab tear-off.
+    [[nodiscard]] virtual std::string window_title() { return "Tabbed Window"; }
     // Returning false leaves the model and content unchanged. A host can show
     // a confirmation UI and retry the operation after the user accepts it.
     [[nodiscard]] virtual bool allow_close_tab(WindowId, TabId, ContentId) { return true; }

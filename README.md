@@ -59,6 +59,8 @@ Try tab selection and closing, the plus button, horizontal reordering, tearing a
 
 `Shell::set_chrome_options` changes the application-painted leading slot and reserves up to four extra caption buttons before the system controls. The host paints and handles those buttons through `IClient`; TabEngine keeps their layout and hit testing aligned with the tab strip.
 
+`IClient::window_title` supplies the native title of every new window, including tear-off windows. Its default is `Tabbed Window`; products should override it with their own identity.
+
 `IClient::handle_shortcut` runs before the built-in Ctrl+T/W/N/Tab bindings. Activation, DPI, and settled interactive placement changes are delivered through separate `IClient` callbacks. Placement uses client-area bounds in screen pixels; `body_geometry_changed` reports the drawable area inside the window.
 
 Hover cards use the library's delay, placement, hit testing, fade, and slide behavior. `hover_card_subtitle` returns application text; `paint_hover_card_preview` receives the preview area on the same Skia canvas. The active tab's card omits its preview, and the workbench paints a small application-owned preview for inactive tabs.
