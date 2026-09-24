@@ -53,8 +53,9 @@ public:
         windows_.at(id).x = screen.x;
         windows_.at(id).y = screen.y;
     }
-    void run_native_move_loop(tabengine::WindowId id) override {
+    tabengine::MoveLoopResult run_native_move_loop(tabengine::WindowId id) override {
         handler_({tabengine::EventType::Moving, id, {}, attach_point_});
+        return ended_ ? tabengine::MoveLoopResult::Canceled : tabengine::MoveLoopResult::Completed;
     }
     void end_native_move_loop(tabengine::WindowId) override { ended_ = true; }
     int run() override { return 0; }

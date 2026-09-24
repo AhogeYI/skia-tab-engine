@@ -77,19 +77,21 @@ private:
     struct Drag {
         DragPhase phase = DragPhase::Idle;
         WindowId window = 0;
+        WindowId source_window = 0;
         WindowId pending_target = 0;
         TabId tab = 0;
         Point press_screen{};
         Point grab_client{};
         Point current_screen{};
         std::size_t original_index = 0;
+        bool cancel_requested = false;
     };
 
     void handle_event(const Event& event);
     void handle_pointer(const Event& event);
     void handle_moving(const Event& event);
     void start_native_drag(WindowId window, Point screen);
-    void finish_native_drag();
+    void finish_native_drag(MoveLoopResult result);
     void cancel_drag();
     void paint(WindowId window);
     void request_destroy(WindowId window);

@@ -174,22 +174,31 @@ public:
         }
     }
 
-    void run_native_move_loop(WindowId id) override {
+    MoveLoopResult run_native_move_loop(WindowId id) override {
         auto it = windows_.find(id);
-        if (it == windows_.end() || it->second->in_move_loop) return;
+        if (it == windows_.end() || it->second->in_move_loop) return MoveLoopResult::Unsupported;
         Native& native = *it->second;
         native.in_move_loop = true;
+        native.move_loop_canceled = false;
+        native.move_loop_mouse_up = false;
         native.skip_first_moving = true;
         release_pointer();
         SendMessageW(native.hwnd, WM_SYSCOMMAND, SC_MOVE | 0x0002,
                      static_cast<LPARAM>(GetMessagePos()));
+        const bool canceled = native.move_loop_canceled;
+        const bool mouse_up = native.move_loop_mouse_up;
         native.in_move_loop = false;
+        native.skip_first_moving = false;
+        if (canceled && !mouse_up) return MoveLoopResult::Canceled;
+        return mouse_up ? MoveLoopResult::Completed : MoveLoopResult::Canceled;
     }
 
     void end_native_move_loop(WindowId id) override {
         auto it = windows_.find(id);
-        if (it != windows_.end() && it->second->in_move_loop)
+        if (it != windows_.end() && it->second->in_move_loop) {
+            it->second->move_loop_canceled = true;
             SendMessageW(it->second->hwnd, WM_CANCELMODE, 0, 0);
+        }
     }
 
     int run() override {
@@ -209,6 +218,8 @@ private:
         WindowId id = 0;
         HWND hwnd = nullptr;
         bool in_move_loop = false;
+        bool move_loop_canceled = false;
+        bool move_loop_mouse_up = false;
         bool skip_first_moving = false;
         bool tracking_mouse = false;
     };
@@ -287,6 +298,10 @@ private:
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE:
         case WM_LBUTTONUP: {
+            if (native->in_move_loop) {
+                if (message == WM_LBUTTONUP) native->move_loop_mouse_up = true;
+                return 0;
+            }
             if (message == WM_MOUSEMOVE && !native->tracking_mouse) {
                 TRACKMOUSEEVENT track{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
                 native->tracking_mouse = TrackMouseEvent(&track) != FALSE;
@@ -301,6 +316,13 @@ private:
                                 {screen.x, screen.y}});
             return 0;
         }
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP:
+            if (native->in_move_loop) {
+                native->move_loop_mouse_up = true;
+                return 0;
+            }
+            break;
         case WM_MOUSELEAVE:
             native->tracking_mouse = false;
             self.emit(*native, {EventType::PointerLeave});
@@ -320,6 +342,12 @@ private:
         case WM_CLOSE:
             self.emit(*native, {EventType::CloseRequested});
             return 0;
+        case WM_NCLBUTTONUP:
+            if (native->in_move_loop) native->move_loop_mouse_up = true;
+            break;
+        case WM_CANCELMODE:
+            if (native->in_move_loop) native->move_loop_canceled = true;
+            break;
         case WM_MOVING:
             if (native->in_move_loop) {
                 if (native->skip_first_moving) native->skip_first_moving = false;

@@ -343,7 +343,6 @@ void Shell::handle_event(const Event& event) {
         handle_pointer(event);
         break;
     case EventType::Moving: handle_moving(event); break;
-    case EventType::NativeMoveEnded: finish_native_drag(); break;
     case EventType::CloseRequested: close_window(event.window); break;
     case EventType::KeyDown: {
         if (event.key == 27 && drag_.window == event.window &&
@@ -537,8 +536,8 @@ void Shell::handle_pointer(const Event& event) {
             return;
         }
         (void)select_tab(event.window, id);
-        drag_ = {DragPhase::Pressed, event.window, 0, id, event.screen, event.client,
-                 event.screen, index};
+        drag_ = {DragPhase::Pressed, event.window, event.window, 0, id, event.screen,
+                 event.client, event.screen, index};
         platform_.capture_pointer(event.window);
         return;
     }
@@ -617,8 +616,8 @@ void Shell::start_native_drag(WindowId window, Point screen) {
     platform_.release_pointer();
     // The first frame must be visible before the synchronous OS move loop.
     paint(drag_.window);
-    platform_.run_native_move_loop(drag_.window);
-    finish_native_drag();
+    const MoveLoopResult result = platform_.run_native_move_loop(drag_.window);
+    finish_native_drag(result);
 }
 
 void Shell::handle_moving(const Event& event) {
@@ -630,16 +629,24 @@ void Shell::handle_moving(const Event& event) {
     platform_.end_native_move_loop(drag_.window);
 }
 
-void Shell::finish_native_drag() {
+void Shell::finish_native_drag(MoveLoopResult result) {
     if (drag_.phase != DragPhase::NativeWindow) return;
-    const WindowId source = drag_.window;
-    const WindowId target = drag_.pending_target;
+    const Drag completed = drag_;
+    const WindowId source = completed.window;
+    const WindowId target = completed.cancel_requested ? 0 : completed.pending_target;
+    bool attached = false;
     if (target && model_.window(target) && model_.window(source)) {
         const auto target_layout = layout(target);
         const Point origin = platform_.client_origin(target);
-        const int x = drag_.current_screen.x - origin.x;
+        const int x = completed.current_screen.x - origin.x;
         const std::size_t index = Layout::insertion_index(target_layout, x, target_layout.tabs.size());
-        (void)transfer_tab(source, target, drag_.tab, index);
+        attached = transfer_tab(source, target, completed.tab, index);
+    }
+    if (!attached && source != completed.source_window &&
+        (completed.cancel_requested || result != MoveLoopResult::Completed || target != 0) &&
+        model_.window(source) && model_.window(completed.source_window)) {
+        (void)transfer_tab(source, completed.source_window, completed.tab,
+                           completed.original_index);
     }
     drag_ = {};
 }
@@ -647,6 +654,8 @@ void Shell::finish_native_drag() {
 void Shell::cancel_drag() {
     if (drag_.phase == DragPhase::Idle) return;
     if (drag_.phase == DragPhase::NativeWindow) {
+        drag_.cancel_requested = true;
+        drag_.pending_target = 0;
         platform_.end_native_move_loop(drag_.window);
         return;
     }

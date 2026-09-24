@@ -72,6 +72,10 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_link_libraries(tabengine_shell_lifecycle_test PRIVATE tabengine_skia)
         add_test(NAME tabengine_shell_lifecycle_test COMMAND tabengine_shell_lifecycle_test)
 
+        add_executable(tabengine_native_drag_cancel_test tests/native_drag_cancel_test.cpp)
+        target_link_libraries(tabengine_native_drag_cancel_test PRIVATE tabengine_skia)
+        add_test(NAME tabengine_native_drag_cancel_test COMMAND tabengine_native_drag_cancel_test)
+
         add_executable(tabengine_windows_renderer_test tests/windows_renderer_test.cpp)
         target_compile_definitions(tabengine_windows_renderer_test PRIVATE UNICODE _UNICODE)
         target_include_directories(tabengine_windows_renderer_test PRIVATE "${TABENGINE_SKIA_ROOT}")

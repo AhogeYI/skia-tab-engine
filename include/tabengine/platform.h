@@ -9,9 +9,11 @@ namespace tabengine {
 
 enum class EventType {
     Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
-    KeyDown, CloseRequested, Moving, NativeMoveEnded,
+    KeyDown, CloseRequested, Moving,
     WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged
 };
+
+enum class MoveLoopResult { Unsupported, Completed, Canceled };
 
 struct Event {
     EventType type;
@@ -46,7 +48,9 @@ public:
     [[nodiscard]] virtual WindowId window_at(Point screen, WindowId excluded) const = 0;
     [[nodiscard]] virtual bool supports_native_move_loop() const = 0;
     virtual void set_client_origin(WindowId id, Point screen) = 0;
-    virtual void run_native_move_loop(WindowId id) = 0;
+    // Runs synchronously. A programmatic end may report Canceled even when
+    // Shell requested it to attach the tab to another window.
+    [[nodiscard]] virtual MoveLoopResult run_native_move_loop(WindowId id) = 0;
     virtual void end_native_move_loop(WindowId id) = 0;
     virtual int run() = 0;
 };

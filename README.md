@@ -8,7 +8,7 @@ This repository is being developed independently. It does not implement an addre
 
 - Ordered tabs, active selection, metadata updates, and transfer between windows while preserving tab and content IDs.
 - Content attach/detach and active-tab notifications, body geometry updates, and vetoable tab/window closure. Transfers keep the application-owned content alive; final closure reports it once.
-- Win32 activation, DPI, and settled window placement notifications; host-first keyboard shortcut handling; Escape, capture loss, or deactivation restores an in-strip drag's original order.
+- Win32 activation, DPI, and settled window placement notifications; host-first keyboard shortcut handling; Escape, capture loss, or deactivation restores an in-strip drag's original order. A canceled native tear-off restores the original tab and content to their source window when it still exists.
 - Width adapting tab strip, selection, close and new tab controls, in strip reorder, and a Win32 native window move loop for tear off and attach.
 - Custom Win32 frame with resize and caption hit testing; a Skia Ganesh/D3D12 flip-swapchain renderer with per-window raster fallback; a visual workbench application.
 - DirectWrite-backed Skia UI and caption typefaces so tab titles and controls render in the Windows build.
@@ -33,7 +33,7 @@ Windows demo and shell test:
 cmake -S . -B build/windows -G "Visual Studio 18 2026" -A x64 `
   -DTABENGINE_BUILD_WIN32_DEMO=ON `
   -DTABENGINE_SKIA_ROOT=<path-to-skia-package>
-cmake --build build/windows --config Debug --target tabengine_win32_demo tabengine_shell_test tabengine_windows_renderer_test
+cmake --build build/windows --config Debug --target tabengine_win32_demo tabengine_shell_test tabengine_native_drag_cancel_test tabengine_windows_renderer_test
 ctest --test-dir build/windows -C Debug --output-on-failure
 ```
 
@@ -58,6 +58,8 @@ Try tab selection and closing, the plus button, horizontal reordering, tearing a
 `Shell::set_chrome_options` changes the application-painted leading slot and reserves up to four extra caption buttons before the system controls. The host paints and handles those buttons through `IClient`; TabEngine keeps their layout and hit testing aligned with the tab strip.
 
 `IClient::handle_shortcut` runs before the built-in Ctrl+T/W/N/Tab bindings. Activation, DPI, and settled interactive placement changes are delivered through separate `IClient` callbacks. Placement uses client-area bounds in screen pixels; `body_geometry_changed` reports the drawable area inside the window.
+
+`IPlatform::run_native_move_loop` returns `Completed`, `Canceled`, or `Unsupported`. A canceled tear-off reattaches the tab at its original index and destroys the temporary window; an attach request over another tab strip takes precedence over the move loop's canceled result. If the original window disappears during the move, the torn window keeps the content alive. No drag rollback calls `tab_closed`.
 
 The Windows drag path follows the responsibilities in Chromium's [TabStripModel](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/ui/tabs/tab_strip_model.h), [Views Widget](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/ui/views/overview.md), and [TabDragController](https://chromium.googlesource.com/chromium/src/+/b39ab7bc4ae0db831a930d373264e5edf8205fdc/chrome/browser/ui/views/tabs/dragging/tab_drag_controller.h): separate model, view, native host, and drag session. It is an original implementation with no Chromium build dependency.
 

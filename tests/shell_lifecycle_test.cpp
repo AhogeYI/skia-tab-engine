@@ -38,7 +38,10 @@ public:
     WindowId window_at(Point, WindowId) const override { return 0; }
     bool supports_native_move_loop() const override { return true; }
     void set_client_origin(WindowId, Point) override {}
-    void run_native_move_loop(WindowId) override { ++native_move_loops; }
+    MoveLoopResult run_native_move_loop(WindowId) override {
+        ++native_move_loops;
+        return MoveLoopResult::Completed;
+    }
     void end_native_move_loop(WindowId) override {}
     int run() override { return 0; }
 
