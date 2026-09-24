@@ -19,7 +19,7 @@ struct Theme {
     std::uint32_t new_tab = 0xFF223050;
     std::uint32_t new_tab_hover = 0xFF2B3A5C;
     std::uint32_t hover_card = 0xFF202B45;
-    std::uint32_t hover_card_border = 0xFF3C4B6A;
+    std::uint32_t hover_card_border = 0x663D527E;
     std::uint32_t caption_hover = 0xFF2A3757;
     std::uint32_t caption_close_hover = 0xFFE81123;
 
