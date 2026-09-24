@@ -49,6 +49,12 @@ void paint_ui_text(SkCanvas& canvas, std::string_view utf8, float x, float basel
                           x, baseline, font, paint);
 }
 
+float measure_ui_text(std::string_view utf8, float size_px) {
+    if (utf8.empty() || size_px <= 0.0f) return 0.0f;
+    SkFont font(ui_typeface(), size_px);
+    return font.measureText(utf8.data(), utf8.size(), SkTextEncoding::kUTF8);
+}
+
 void paint_caption_symbol(SkCanvas& canvas, std::string_view utf8, float center_x,
                           float center_y, float size_px, std::uint32_t argb) {
     if (utf8.empty() || size_px <= 0.0f) return;
