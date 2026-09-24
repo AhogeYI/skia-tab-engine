@@ -29,7 +29,22 @@ int main() {
 
     const auto layout = tabengine::Layout::tab_strip(1000, 3, 1.0f);
     assert(layout.tabs.size() == 3);
-    assert(layout.tabs[1].x < layout.tabs[0].right());
+    assert(layout.height == 41);
+    assert(layout.leading_slot.width == 36);
+    assert(layout.caption_start == 863); // 3 × 45dp + two 1dp gaps
+    assert(layout.tabs[0].x == 36);
+    assert(layout.tabs[0].width == 256);
+    assert(layout.tabs[1].x == 274); // 18dp layout overlap
+    assert(layout.tabs[2].x == 512);
+    assert(layout.new_tab.x == layout.tabs.back().right() - 6);
+    assert(layout.new_tab.y == 6 && layout.new_tab.width == 28);
     assert(tabengine::Layout::insertion_index(layout, layout.tabs[2].right(), 0) == 2);
+    const auto crowded = tabengine::Layout::tab_strip(380, 12, 1.0f);
+    assert(crowded.tabs[0].width == 32);
+    assert(crowded.new_tab.right() <= crowded.caption_start);
+    const auto scaled = tabengine::Layout::tab_strip(1250, 3, 1.25f);
+    assert(scaled.leading_slot.width == 45);
+    assert(scaled.tabs[1].x == scaled.tabs[0].right() - 23);
+    assert(scaled.new_tab.x == scaled.tabs.back().right() - 15 + 8);
     return 0;
 }

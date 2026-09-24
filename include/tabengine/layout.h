@@ -10,6 +10,8 @@ namespace tabengine {
 struct StripLayout {
     std::vector<Rect> tabs;
     Rect new_tab;
+    Rect leading_slot;
+    int caption_start = 0;
     int height = 40;
 };
 
@@ -21,4 +23,3 @@ public:
 };
 
 } // namespace tabengine
-

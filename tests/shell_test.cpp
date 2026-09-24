@@ -137,6 +137,11 @@ int main() {
     platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 9, true, true});
     assert(shell.model().window(target)->active == before_cycle);
 
+    const auto plus = tabengine::Layout::tab_strip(640, destination->tabs.size(), 1.0f).new_tab;
+    platform.emit({tabengine::EventType::PointerDown, target,
+                   {plus.x + plus.width / 2, plus.y + plus.height / 2}, {0, 0}});
+    assert(shell.model().window(target)->tabs.size() == 3);
+
     platform.emit({tabengine::EventType::KeyDown, target, {}, {}, {}, 'N', true});
     const auto ids = shell.model().window_ids();
     assert(ids.size() == 3);

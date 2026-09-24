@@ -1,8 +1,12 @@
 #include "tabengine/shell.h"
 #include "tabengine/text.h"
+#include "chrome_metrics.h"
 
 #include "include/core/SkCanvas.h"
 #include "include/core/SkPaint.h"
+#include "include/core/SkPath.h"
+#include "include/core/SkPathBuilder.h"
+#include "include/core/SkPoint.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkRRect.h"
 
@@ -15,6 +19,51 @@ namespace {
 SkRect skrect(Rect r) {
     return SkRect::MakeXYWH(static_cast<float>(r.x), static_cast<float>(r.y),
                             static_cast<float>(r.width), static_cast<float>(r.height));
+}
+
+SkPath tab_face(Rect bounds, float scale, bool active) {
+    using M = detail::ChromeMetrics;
+    SkPathBuilder path;
+    const float width = static_cast<float>(bounds.width);
+    const float height = static_cast<float>(bounds.height);
+    if (width <= 0 || height <= 0) return path.detach();
+    const float shoulder = std::min(static_cast<float>(M::bottom_radius) * scale, width / 2.0f);
+    const float inner_width = width - 2.0f * shoulder;
+    if (inner_width < 1.0f) {
+        path.addRect(SkRect::MakeWH(width, height));
+    } else if (!active) {
+        const float radius = std::min({static_cast<float>(M::top_radius) * scale,
+                                       inner_width / 2.0f, height / 2.0f});
+        path.addRRect(SkRRect::MakeRectXY(
+            SkRect::MakeLTRB(shoulder, 0, width - shoulder, height), radius, radius));
+    } else {
+        const float radius = std::min({static_cast<float>(M::top_radius) * scale,
+                                       inner_width / 2.0f, height / 2.0f});
+        const float extension = std::min(shoulder, height);
+        path.moveTo(0, height);
+        path.arcTo(SkPoint{extension, extension}, 0, SkPathBuilder::kSmall_ArcSize,
+                   SkPathDirection::kCCW, SkPoint{shoulder, height - extension});
+        path.lineTo(shoulder, radius);
+        path.arcTo(SkPoint{radius, radius}, 0, SkPathBuilder::kSmall_ArcSize,
+                   SkPathDirection::kCW, SkPoint{shoulder + radius, 0});
+        path.lineTo(width - shoulder - radius, 0);
+        path.arcTo(SkPoint{radius, radius}, 0, SkPathBuilder::kSmall_ArcSize,
+                   SkPathDirection::kCW, SkPoint{width - shoulder, radius});
+        path.lineTo(width - shoulder, height - extension);
+        path.arcTo(SkPoint{extension, extension}, 0, SkPathBuilder::kSmall_ArcSize,
+                   SkPathDirection::kCCW, SkPoint{width, height});
+        path.close();
+    }
+    return path.detach();
+}
+
+Rect caption_button(const StripLayout& strip, int index, float scale) {
+    using M = detail::ChromeMetrics;
+    const int x = strip.caption_start + static_cast<int>(std::lround(
+        (M::caption_button_width * index + M::caption_button_spacing * std::max(0, index - 1)) * scale));
+    const int right = strip.caption_start + static_cast<int>(std::lround(
+        (M::caption_button_width * (index + 1) + M::caption_button_spacing * index) * scale));
+    return {x, 0, right - x, strip.height};
 }
 
 void text(SkCanvas& canvas, const std::string& value, float x, float y, float size, SkColor color) {
@@ -201,10 +250,17 @@ TabId Shell::tab_at(WindowId window, Point client) const {
     if (!w) return 0;
     const auto strip = layout(window);
     for (std::size_t i = 0; i < strip.tabs.size(); ++i) {
-        if (w->tabs[i].id == w->active && strip.tabs[i].contains(client)) return w->active;
+        const Rect r = strip.tabs[i];
+        if (w->tabs[i].id == w->active && r.contains(client) &&
+            tab_face(r, platform_.scale(window), true).contains(
+                static_cast<float>(client.x - r.x), static_cast<float>(client.y - r.y)))
+            return w->active;
     }
     for (std::size_t i = strip.tabs.size(); i-- > 0;) {
-        if (strip.tabs[i].contains(client)) return w->tabs[i].id;
+        const Rect r = strip.tabs[i];
+        if (r.contains(client) && tab_face(r, platform_.scale(window), false).contains(
+                static_cast<float>(client.x - r.x), static_cast<float>(client.y - r.y)))
+            return w->tabs[i].id;
     }
     return 0;
 }
@@ -221,9 +277,8 @@ bool Shell::over_strip(WindowId window, Point screen) const {
 bool Shell::caption_hit(WindowId window, Point client) const {
     if (!model_.window(window)) return false;
     const auto strip = layout(window);
-    const int width = platform_.client_size(window).width;
     return client.y >= 0 && client.y < strip.height &&
-           client.x < width - static_cast<int>(135 * platform_.scale(window)) &&
+           client.x < strip.caption_start &&
            !strip.new_tab.contains(client) && tab_at(window, client) == 0;
 }
 
@@ -241,16 +296,16 @@ void Shell::clear_hover(WindowId window) {
 void Shell::update_hover(WindowId window, Point client) {
     const auto strip = layout(window);
     const float scale = platform_.scale(window);
-    const int caption_start = platform_.client_size(window).width -
-                              static_cast<int>(135 * scale);
+    const int caption_start = strip.caption_start;
     TabId tab = 0;
     TabId close = 0;
     bool new_tab = false;
     int caption = -1;
     if (client.y >= 0 && client.y < strip.height) {
         if (client.x >= caption_start) {
-            caption = std::clamp(static_cast<int>((client.x - caption_start) /
-                                  std::max(1, static_cast<int>(45 * scale))), 0, 2);
+            for (int i = 0; i < detail::ChromeMetrics::caption_button_count; ++i) {
+                if (caption_button(strip, i, scale).contains(client)) caption = i;
+            }
         } else if (strip.new_tab.contains(client)) {
             new_tab = true;
         } else if ((tab = tab_at(window, client))) {
@@ -288,11 +343,13 @@ void Shell::handle_pointer(const Event& event) {
                                        event.size.height - strip.height});
             return;
         }
-        const int caption_start = platform_.client_size(event.window).width -
-                                  static_cast<int>(135 * platform_.scale(event.window));
+        const int caption_start = strip.caption_start;
         if (event.client.x >= caption_start) {
-            const int button_width = static_cast<int>(45 * platform_.scale(event.window));
-            const int button = (event.client.x - caption_start) / std::max(1, button_width);
+            int button = 2;
+            for (int i = 0; i < detail::ChromeMetrics::caption_button_count; ++i) {
+                if (caption_button(strip, i, platform_.scale(event.window)).contains(event.client))
+                    button = i;
+            }
             if (button == 0) platform_.minimize(event.window);
             else if (button == 1) platform_.toggle_maximize(event.window);
             else close_window(event.window);
@@ -309,8 +366,10 @@ void Shell::handle_pointer(const Event& event) {
                                      [id](const Tab& tab) { return tab.id == id; });
         const std::size_t index = static_cast<std::size_t>(it - w->tabs.begin());
         const Rect rect = strip.tabs[index];
-        if ((id == w->active || rect.width >=
-             static_cast<int>(100 * platform_.scale(event.window))) &&
+        if (((id == w->active && rect.width >=
+              static_cast<int>(detail::ChromeMetrics::min_active_width * platform_.scale(event.window))) ||
+             rect.width >= static_cast<int>(detail::ChromeMetrics::close_hide_width *
+                                            platform_.scale(event.window))) &&
             event.client.x >= rect.right() - static_cast<int>(37 * platform_.scale(event.window)) &&
             event.client.x < rect.right() - static_cast<int>(13 * platform_.scale(event.window))) {
             (void)close_tab(event.window, id);
@@ -441,8 +500,7 @@ void Shell::paint(WindowId window) {
     if (!canvas) return;
     const float scale = platform_.scale(window);
     const StripLayout strip = layout(window);
-    const int caption_width = static_cast<int>(135 * scale);
-    const int caption_start = std::max(0, size.width - caption_width);
+    const int caption_start = strip.caption_start;
     canvas->clear(theme_.body);
     SkPaint paint;
     paint.setAntiAlias(true);
@@ -452,8 +510,7 @@ void Shell::paint(WindowId window) {
     canvas->save();
     canvas->clipRect(SkRect::MakeLTRB(0, 0, static_cast<float>(caption_start),
                                      static_cast<float>(strip.height)));
-    client_.paint_leading(window, *canvas,
-                          {0, 0, static_cast<int>(40 * scale), strip.height});
+    client_.paint_leading(window, *canvas, strip.leading_slot);
 
     const auto paint_tab = [&](std::size_t i) {
         const Tab& tab = w->tabs[i];
@@ -461,13 +518,10 @@ void Shell::paint(WindowId window) {
         const bool active = tab.id == w->active;
         paint.setColor(active ? theme_.tab_active
                               : tab.id == hover_tab_ ? theme_.tab_hover : theme_.tab_inactive);
-        canvas->drawRoundRect(skrect(r), 10.0f * scale, 10.0f * scale, paint);
-        if (active) {
-            canvas->drawRect(SkRect::MakeLTRB(static_cast<float>(r.x + 10 * scale),
-                                              static_cast<float>(r.bottom() - 11 * scale),
-                                              static_cast<float>(r.right() - 10 * scale),
-                                              static_cast<float>(r.bottom())), paint);
-        }
+        canvas->save();
+        canvas->translate(static_cast<float>(r.x), static_cast<float>(r.y));
+        canvas->drawPath(tab_face(r, scale, active), paint);
+        canvas->restore();
         const int icon_size = static_cast<int>(16 * scale);
         const Rect icon{r.x + static_cast<int>(20 * scale),
                         r.y + (r.height - icon_size) / 2, icon_size, icon_size};
@@ -481,7 +535,8 @@ void Shell::paint(WindowId window) {
         text(*canvas, tab.title, title_x, r.y + 23 * scale, 12 * scale,
              active ? theme_.text : theme_.text_muted);
         canvas->restore();
-        if (active || r.width >= static_cast<int>(100 * scale)) {
+        if ((active && r.width >= static_cast<int>(detail::ChromeMetrics::min_active_width * scale)) ||
+            r.width >= static_cast<int>(detail::ChromeMetrics::close_hide_width * scale)) {
             const float cx = r.right() - 25 * scale;
             const float cy = r.y + r.height * 0.5f;
             if (hover_window_ == window && hover_close_ == tab.id) {
@@ -499,8 +554,12 @@ void Shell::paint(WindowId window) {
         if (w->tabs[i].id == w->active || w->tabs[i + 1].id == w->active) continue;
         const Rect r = strip.tabs[i];
         paint.setColor(theme_.separator);
-        canvas->drawRoundRect(SkRect::MakeXYWH(r.right() - 9 * scale,
-                                                r.y + 9 * scale, 1 * scale, 16 * scale),
+        canvas->drawRoundRect(SkRect::MakeXYWH(
+                                  r.right() - (detail::ChromeMetrics::overlap +
+                                               detail::ChromeMetrics::separator_width) * scale / 2,
+                                  r.y + (r.height - detail::ChromeMetrics::separator_height * scale) / 2,
+                                  detail::ChromeMetrics::separator_width * scale,
+                                  detail::ChromeMetrics::separator_height * scale),
                               scale, scale, paint);
     }
     for (std::size_t i = 0; i < w->tabs.size(); ++i) {
@@ -514,14 +573,16 @@ void Shell::paint(WindowId window) {
     canvas->restore();
 
     constexpr const char* symbols[] = {"\xEE\xA4\xA1", "\xEE\xA4\xA2", "\xEE\xA2\xBB"};
-    for (int i = 0; i < 3; ++i) {
-        const float x = caption_start + i * 45 * scale;
+    for (int i = 0; i < detail::ChromeMetrics::caption_button_count; ++i) {
+        const Rect button = caption_button(strip, i, scale);
+        const float x = static_cast<float>(button.x + (i ? static_cast<int>(scale) : 0));
+        const float width = static_cast<float>(button.width - (i ? static_cast<int>(scale) : 0));
         if (hover_window_ == window && hover_caption_ == i) {
             paint.setColor(i == 2 ? theme_.caption_close_hover : theme_.caption_hover);
-            canvas->drawRect(SkRect::MakeXYWH(x, 0, 45 * scale,
+            canvas->drawRect(SkRect::MakeXYWH(x, 0, width,
                                                static_cast<float>(strip.height)), paint);
         }
-        paint_caption_symbol(*canvas, symbols[i], x + 22.5f * scale,
+        paint_caption_symbol(*canvas, symbols[i], x + width * 0.5f,
                              strip.height * 0.5f, 12 * scale, theme_.text);
     }
     const Rect body{0, strip.height, size.width, std::max(0, size.height - strip.height)};
