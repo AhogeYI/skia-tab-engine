@@ -373,9 +373,13 @@ private:
             const EventType type = message == WM_LBUTTONDOWN ? EventType::PointerDown
                                   : message == WM_LBUTTONUP ? EventType::PointerUp
                                                             : EventType::PointerMove;
+            // Modifier keys ride along so hosts can Ctrl/Shift-click without
+            // touching Win32 themselves; same source as KeyDown.
             self.emit(*native, {type, native->id,
                                 {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)},
-                                {screen.x, screen.y}});
+                                {screen.x, screen.y}, {},
+                                0, (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                                (GetKeyState(VK_SHIFT) & 0x8000) != 0});
             return 0;
         }
         case WM_RBUTTONUP:

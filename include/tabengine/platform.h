@@ -23,6 +23,8 @@ struct Event {
     Point screen{};
     Size size{};
     int key = 0;
+    // Keyboard state carried on KeyDown (the pressed key's modifiers) and on
+    // pointer presses (Ctrl/Shift-click selection).
     bool ctrl = false;
     bool shift = false;
     bool alt = false;

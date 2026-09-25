@@ -113,7 +113,11 @@ public:
     std::string window_title() override { return "Test Product"; }
     void tab_closed(tabengine::ContentId id) override { closed_.push_back(id); }
     void paint_body(tabengine::WindowId, tabengine::TabId, SkCanvas&, tabengine::Rect) override {}
-    void body_event(const tabengine::Event&, tabengine::Rect) override {}
+    void body_event(const tabengine::Event& event, tabengine::Rect) override {
+        last_body_ctrl = event.ctrl;
+        last_body_shift = event.shift;
+        ++body_events_;
+    }
     void paint_tab_icon(tabengine::WindowId, tabengine::TabId tab, SkCanvas&,
                         tabengine::Rect bounds) override {
         icon_x_[tab] = bounds.x;
@@ -130,6 +134,9 @@ public:
     int preview_paints() const { return preview_paints_; }
     void clear_paint_order() { paint_order_.clear(); }
     const std::vector<tabengine::TabId>& paint_order() const { return paint_order_; }
+    bool last_body_ctrl = false;
+    bool last_body_shift = false;
+    int body_events() const { return body_events_; }
 
 private:
     tabengine::ContentId next_ = 1;
@@ -137,6 +144,7 @@ private:
     std::unordered_map<tabengine::TabId, int> icon_x_;
     std::vector<tabengine::TabId> paint_order_;
     int preview_paints_ = 0;
+    int body_events_ = 0;
 };
 
 void check_hover_paint_order() {
@@ -293,6 +301,13 @@ int main() {
         CHECK(renderer->canvas(source)->peekPixels(&pixels));
         return pixels.getColor(x, y);
     };
+    // Pointer presses carry their modifier keys to the body verbatim - hosts
+    // implement Ctrl/Shift-click selection on them.
+    platform.emit({tabengine::EventType::PointerDown, source, {70, 300}, {170, 400}, {},
+                   0, true, true, false});
+    CHECK(client.body_events() > 0 && client.last_body_ctrl && client.last_body_shift);
+    platform.emit({tabengine::EventType::PointerDown, source, {70, 300}, {170, 400}});
+    CHECK(!client.last_body_ctrl && !client.last_body_shift);
     const SkColor opening = pixel_at(350, 15);
     platform.now = 0.25;
     platform.emit({tabengine::EventType::AnimationFrame, source});
