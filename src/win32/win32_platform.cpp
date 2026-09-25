@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <imm.h>
+#pragma comment(lib, "imm32.lib")
 
 #include <algorithm>
 #include <memory>
@@ -19,6 +21,19 @@ namespace {
 constexpr wchar_t kClassName[] = L"TabEngineWindow";
 constexpr wchar_t kWakeClassName[] = L"TabEngineWake";
 constexpr UINT_PTR kAnimationTimer = 1;
+
+// UTF-16 composition strings (ImmGetCompositionStringW) to UTF-8 events;
+// surrogate pairs fold to one scalar value.
+std::string narrow(std::wstring_view wide) {
+    if (wide.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(),
+                                         static_cast<int>(wide.size()), nullptr, 0,
+                                         nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(size), '\0');
+    if (size) WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                  out.data(), size, nullptr, nullptr);
+    return out;
+}
 
 std::wstring widen(std::string_view utf8) {
     if (utf8.empty()) return {};
@@ -72,6 +87,10 @@ public:
 
     void set_wake_handler(std::function<void()> handler) override {
         wake_ = std::move(handler);
+    }
+
+    void set_ime_caret_provider(std::function<Rect(WindowId)> provider) override {
+        ime_caret_ = std::move(provider);
     }
 
     void wake() override {
@@ -255,6 +274,8 @@ private:
         WindowId id = 0;
         HWND hwnd = nullptr;
         SurrogateComposer chars;
+        bool ime_composing = false;  // between START- and ENDCOMPOSITION
+        bool ime_committed = false;  // this session produced a result string
         bool in_move_loop = false;
         bool move_loop_canceled = false;
         bool move_loop_mouse_up = false;
@@ -427,7 +448,13 @@ private:
         }
         case WM_CHAR: {
             // WM_SYSCHAR is not translated: an Alt+letter mnemonic is a command,
-            // not text. Astral characters arrive as two surrogate units.
+            // not text. Astral characters arrive as two surrogate units. While
+            // an IME composition is open the committed text arrives through
+            // WM_IME_COMPOSITION's result string instead - a WM_CHAR in that
+            // window is the IME echo and must not double-deliver.
+            if (native->ime_composing) {
+                return 0;
+            }
             if (native->chars.feed(static_cast<char32_t>(wp))) {
                 Event text;
                 text.type = EventType::TextInput;
@@ -436,6 +463,71 @@ private:
             }
             return 0;
         }
+        case WM_IME_SETCONTEXT:
+            // The app paints its own preedit; only the system candidate and
+            // status windows stay with the default handler.
+            if (wp) lp &= ~ISC_SHOWUICOMPOSITIONWINDOW;
+            break;
+        case WM_IME_STARTCOMPOSITION: {
+            native->ime_composing = true;
+            native->ime_committed = false;
+            // Park the IME's own inline edit at the client's caret so the
+            // candidate window opens next to it.
+            if (self.ime_caret_) {
+                const Rect caret = self.ime_caret_(native->id);
+                if (caret.width > 0 && caret.height > 0) {
+                    HIMC context = ImmGetContext(hwnd);
+                    if (context) {
+                        COMPOSITIONFORM form{};
+                        form.dwStyle = CFS_RECT;
+                        form.ptCurrentPos = {caret.x, caret.y + caret.height};
+                        form.rcArea = {caret.x, caret.y, caret.x + std::max(caret.width, 8),
+                                       caret.y + std::max(caret.height, 16)};
+                        ImmSetCompositionWindow(context, &form);
+                        ImmReleaseContext(hwnd, context);
+                    }
+                }
+            }
+            self.emit(*native, {EventType::ImeStart});
+            return 0;
+        }
+        case WM_IME_COMPOSITION: {
+            HIMC context = ImmGetContext(hwnd);
+            if (!context) break;
+            wchar_t buffer[64];
+            Event update;
+            if (lp & GCS_RESULTSTR) {
+                update.type = EventType::ImeCommit;
+            } else if (lp & GCS_COMPSTR) {
+                update.type = EventType::ImeUpdate;
+            }
+            if (update.type == EventType::ImeCommit || update.type == EventType::ImeUpdate) {
+                const DWORD kind = update.type == EventType::ImeCommit ? GCS_RESULTSTR
+                                                                       : GCS_COMPSTR;
+                const LONG bytes = ImmGetCompositionStringW(context, kind, buffer,
+                                                            sizeof(buffer) - sizeof(wchar_t));
+                if (bytes >= 0) {
+                    update.ime_text = narrow(std::wstring_view(
+                        buffer, static_cast<std::size_t>(bytes) / sizeof(wchar_t)));
+                }
+                if (update.type == EventType::ImeCommit) {
+                    native->ime_committed = true;
+                }
+                self.emit(*native, update);
+            }
+            ImmReleaseContext(hwnd, context);
+            return 0;
+        }
+        case WM_IME_ENDCOMPOSITION:
+            // A session that never produced a result string was canceled
+            // (Escape, focus move, IME switch); a committed session already
+            // delivered its text.
+            if (native->ime_composing && !native->ime_committed) {
+                self.emit(*native, {EventType::ImeCancel});
+            }
+            native->ime_composing = false;
+            native->ime_committed = false;
+            return 0;
         case WM_ACTIVATE:
             self.emit(*native, {LOWORD(wp) == WA_INACTIVE ? EventType::WindowDeactivated
                                                        : EventType::WindowActivated});
@@ -484,6 +576,7 @@ private:
     std::unordered_map<WindowId, std::unique_ptr<Native>> windows_;
     std::function<void(const Event&)> events_;
     std::function<bool(WindowId, Point)> caption_hit_;
+    std::function<Rect(WindowId)> ime_caret_;
     std::function<void()> wake_;
     HWND wake_hwnd_ = nullptr;
     std::vector<WindowId> pending_destroy_;

@@ -3,6 +3,7 @@
 #include "tabengine/types.h"
 
 #include <functional>
+#include <string>
 #include <string_view>
 
 namespace tabengine {
@@ -11,7 +12,13 @@ enum class EventType {
     Paint, Resized, PointerDown, PointerMove, PointerUp, PointerLeave, CaptureLost,
     KeyDown, TextInput, PointerWheel, CloseRequested, Moving,
     WindowActivated, WindowDeactivated, DpiChanged, PlacementChanged,
-    AnimationFrame
+    AnimationFrame,
+    // IME composition, delivered straight to IClient::body_event like
+    // TextInput (no shortcut hook, no default bindings). ImeStart opens a
+    // composition session; ImeUpdate carries the current preedit string;
+    // ImeCommit carries the final string (insert it as text); ImeCancel
+    // reports the session ended without a commit.
+    ImeStart, ImeUpdate, ImeCommit, ImeCancel
 };
 
 enum class MoveLoopResult { Unsupported, Completed, Canceled };
@@ -35,6 +42,10 @@ struct Event {
     // PointerWheel only: signed vertical wheel delta in native units (+120 per
     // notch on Windows). The position fields carry the wheel's client point.
     int wheel = 0;
+    // ImeUpdate / ImeCommit only: the composition (preedit) or committed
+    // string, UTF-8. An empty ImeUpdate means the preedit emptied; clients
+    // replace their preview with the string verbatim.
+    std::string ime_text;
 };
 
 // UTF-16 backends receive an astral character as a high + low surrogate pair
@@ -79,6 +90,12 @@ public:
     // set_wake_handler is UI-thread only.
     virtual void set_wake_handler(std::function<void()> handler) = 0;
     virtual void wake() = 0;
+    // Caret rectangle (window client pixels) the IME candidate window should
+    // sit next to; a backend queries this when a composition session opens.
+    // Return an empty rect when no editor has focus (the system default
+    // placement applies). UI-thread only, called synchronously from the
+    // platform layer.
+    virtual void set_ime_caret_provider(std::function<Rect(WindowId)> provider) {}
     virtual bool create(WindowId id, Rect bounds, std::string_view title, bool visible) = 0;
     virtual void show(WindowId id) = 0;
     virtual void destroy(WindowId id) = 0;

@@ -44,6 +44,11 @@ public:
     virtual void window_placement_changed(WindowId, Rect, float) {}
     // Return true to consume a shortcut before TabEngine's default bindings.
     virtual bool handle_shortcut(const Event&) { return false; }
+    // Caret rectangle (logical, body-relative) of the editor currently in an
+    // IME composition; the shell converts it to window client pixels for the
+    // platform's candidate-window placement. Empty rect = no editor (the
+    // system default placement applies).
+    [[nodiscard]] virtual Rect ime_caret_rect(WindowId) { return {}; }
     virtual void paint_extra_caption_button(WindowId, int, SkCanvas&, Rect, bool) {}
     virtual void extra_caption_button_pressed(WindowId, int) {}
     virtual void tab_closed(ContentId content) = 0;

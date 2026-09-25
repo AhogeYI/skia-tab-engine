@@ -92,6 +92,11 @@ public:
             received.push_back(event.code_point);
             body_height = body.height;
         }
+        if (event.type == EventType::ImeStart || event.type == EventType::ImeUpdate ||
+            event.type == EventType::ImeCommit || event.type == EventType::ImeCancel) {
+            ime_events.push_back({event.type, event.ime_text});
+            ime_body_height = body.height;
+        }
         if (event.type == EventType::KeyDown && event.alt && event.key == VK_LEFT_KEY) {
             ++alt_left;
         }
@@ -107,6 +112,8 @@ public:
     int body_height = 0;
     std::vector<char32_t> received;
     std::vector<std::array<int, 3>> wheels;
+    std::vector<std::pair<EventType, std::string>> ime_events;
+    int ime_body_height = 0;
 };
 
 void check_composer_pairs_astral() {
@@ -174,6 +181,40 @@ void check_shell_drops_text_for_unknown_window() {
     CHECK(client.received.empty());
 }
 
+// IME events are text: straight to the body with the composition string,
+// never past the shortcut hook or the default bindings.
+void check_shell_forwards_ime_to_body() {
+    Platform platform;
+    Renderer renderer;
+    Client client;
+    Shell shell(platform, renderer, client);
+    const WindowId window = shell.open_window({100, 100, 900, 600}, true, false);
+    const std::size_t tabs_before = shell.model().window(window)->tabs.size();
+
+    Event update{EventType::ImeUpdate, window};
+    update.ime_text = "ä½ å¥½"; // ni hao
+    platform.emit(update);
+    Event commit{EventType::ImeCommit, window};
+    commit.ime_text = "ä½ å¥½";
+    platform.emit(commit);
+    platform.emit({EventType::ImeCancel, window});
+    platform.emit({EventType::ImeStart, window});
+
+    CHECK(client.ime_events.size() == 4);
+    CHECK(client.ime_events[0].first == EventType::ImeUpdate);
+    CHECK(client.ime_events[1].first == EventType::ImeCommit);
+    CHECK(client.ime_events[2].first == EventType::ImeCancel);
+    CHECK(client.ime_events[3].first == EventType::ImeStart);
+    CHECK(client.ime_events[0].second == "ä½ å¥½");
+    CHECK(client.shortcuts == 0);
+    CHECK(client.ime_body_height > 0);
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before);
+    // IME for a closed window is dropped like any other event.
+    shell.close_window(window);
+    platform.emit({EventType::ImeUpdate, window});
+    CHECK(client.ime_events.size() == 4);
+}
+
 // Wheels always belong to the body, with the client point carried along.
 void check_shell_forwards_wheel_to_body() {
     Platform platform;
@@ -210,6 +251,7 @@ int main() {
     check_composer_dangling_high_dropped();
     check_shell_forwards_text_to_body();
     check_shell_drops_text_for_unknown_window();
+    check_shell_forwards_ime_to_body();
     check_shell_forwards_wheel_to_body();
     return 0;
 }

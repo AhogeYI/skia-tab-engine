@@ -160,11 +160,29 @@ Shell::Shell(IPlatform& platform, IRenderer& renderer, IClient& client)
     platform_.set_event_handler([this](const Event& event) { on_event(event); });
     platform_.set_caption_hit_handler(
         [this](WindowId window, Point client) { return caption_hit(window, client); });
+    // IME candidate windows follow the client's edit caret: the client
+    // reports body-relative logical coordinates, the shell owns the body
+    // origin and DPI, the platform positions the native window.
+    platform_.set_ime_caret_provider([this](WindowId window) {
+        if (!model_.window(window)) {
+            return Rect{};
+        }
+        const float scale = platform_.scale(window);
+        const Rect caret = client_.ime_caret_rect(window);
+        const float strip = static_cast<float>(layout(window).height) * scale;
+        const auto px = [scale](float v) {
+            return static_cast<int>(v * scale);
+        };
+        return Rect{px(static_cast<float>(caret.x)), px(static_cast<float>(caret.y)) +
+                                                          static_cast<int>(strip),
+                    px(static_cast<float>(caret.width)), px(static_cast<float>(caret.height))};
+    });
 }
 
 Shell::~Shell() {
     platform_.set_event_handler({});
     platform_.set_caption_hit_handler({});
+    platform_.set_ime_caret_provider({});
     for (WindowId id : model_.window_ids()) {
         busy_windows_.insert(id);
         destroy_window_contents(id);
@@ -477,7 +495,14 @@ void Shell::handle_event(const Event& event) {
         break;
     case EventType::Moving: handle_moving(event); break;
     case EventType::AnimationFrame: advance_animations(event.window); break;
-    case EventType::TextInput: {
+    case EventType::TextInput:
+    case EventType::ImeStart:
+    case EventType::ImeUpdate:
+    case EventType::ImeCommit:
+    case EventType::ImeCancel: {
+        // Text input of every kind - plain characters and IME composition -
+        // belongs to the body, never the strip, and never passes the
+        // shortcut hook or the engine's default key bindings.
         if (!model_.window(event.window)) break;
         const auto strip = layout(event.window);
         client_.body_event(event, {0, strip.height, event.size.width,
