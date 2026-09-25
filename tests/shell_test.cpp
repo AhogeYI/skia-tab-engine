@@ -147,6 +147,36 @@ private:
     int body_events_ = 0;
 };
 
+void check_shift_modified_chords_reach_the_client() {
+    FakePlatform platform;
+    auto renderer = tabengine::make_skia_raster_renderer();
+    Client client;
+    tabengine::Shell shell(platform, *renderer, client);
+    const auto window = shell.open_window({100, 100, 900, 600});
+    const std::size_t windows_before = shell.model().window_ids().size();
+    const std::size_t tabs_before = shell.model().window(window)->tabs.size();
+
+    // Ctrl+Shift+N and Ctrl+Shift+T are product chords (new folder, reopen
+    // closed tab): the engine's unmodified defaults must not claim them, and
+    // they must reach the client's body with their modifiers intact.
+    int before = client.body_events();
+    platform.emit({tabengine::EventType::KeyDown, window, {}, {}, {}, 'N', true, true});
+    CHECK(client.body_events() == before + 1);
+    CHECK(client.last_body_ctrl && client.last_body_shift);
+    CHECK(shell.model().window_ids().size() == windows_before); // no new window
+
+    before = client.body_events();
+    platform.emit({tabengine::EventType::KeyDown, window, {}, {}, {}, 'T', true, true});
+    CHECK(client.body_events() == before + 1);
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before); // no new tab
+
+    // The plain engine defaults still work.
+    platform.emit({tabengine::EventType::KeyDown, window, {}, {}, {}, 'T', true});
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before + 1);
+    platform.emit({tabengine::EventType::KeyDown, window, {}, {}, {}, 'N', true});
+    CHECK(shell.model().window_ids().size() == windows_before + 1);
+}
+
 void check_hover_paint_order() {
     FakePlatform platform;
     auto renderer = tabengine::make_skia_raster_renderer();
@@ -369,5 +399,6 @@ int main() {
     check_hover_and_reorder_visual();
     check_hover_card_visual();
     check_hover_paint_order();
+    check_shift_modified_chords_reach_the_client();
     return 0;
 }

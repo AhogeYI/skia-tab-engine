@@ -509,16 +509,19 @@ void Shell::handle_event(const Event& event) {
             }
         }
         if (client_.handle_shortcut(event) || !model_.window(event.window)) break;
-        if (event.ctrl && event.key == 'T') {
+        // The engine owns only the plain chords: an extra Shift or Alt turns
+        // Ctrl+T/W/N into a product chord (reopen closed tab, close window,
+        // new folder, ...) that must reach the client's body untouched.
+        if (event.ctrl && !event.shift && !event.alt && event.key == 'T') {
             (void)new_tab(event.window);
             break;
         }
-        if (event.ctrl && event.key == 'W') {
+        if (event.ctrl && !event.shift && !event.alt && event.key == 'W') {
             const WindowTabs* w = model_.window(event.window);
             if (w && w->active) (void)close_tab(event.window, w->active);
             break;
         }
-        if (event.ctrl && event.key == 'N') {
+        if (event.ctrl && !event.shift && !event.alt && event.key == 'N') {
             const Size size = platform_.client_size(event.window);
             const Point origin = platform_.client_origin(event.window);
             (void)open_window({origin.x + 40, origin.y + 40,
