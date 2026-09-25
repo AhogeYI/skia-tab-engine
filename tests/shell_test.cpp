@@ -147,6 +147,22 @@ private:
     int body_events_ = 0;
 };
 
+void check_body_release_and_capture_loss_reach_client() {
+    FakePlatform platform;
+    auto renderer = tabengine::make_skia_raster_renderer();
+    Client client;
+    tabengine::Shell shell(platform, *renderer, client);
+    const auto window = shell.open_window({100, 100, 900, 600});
+    const int before = client.body_events();
+    platform.emit({tabengine::EventType::PointerDown, window, {300, 200}});
+    CHECK(client.body_events() == before + 1);
+    // A body editor can own pointer capture and release above the strip.
+    platform.emit({tabengine::EventType::PointerUp, window, {300, 10}});
+    CHECK(client.body_events() == before + 2);
+    platform.emit({tabengine::EventType::CaptureLost, window});
+    CHECK(client.body_events() == before + 3);
+}
+
 void check_shift_modified_chords_reach_the_client() {
     FakePlatform platform;
     auto renderer = tabengine::make_skia_raster_renderer();
@@ -400,5 +416,6 @@ int main() {
     check_hover_card_visual();
     check_hover_paint_order();
     check_shift_modified_chords_reach_the_client();
+    check_body_release_and_capture_loss_reach_client();
     return 0;
 }

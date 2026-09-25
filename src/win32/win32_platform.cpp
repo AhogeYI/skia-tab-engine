@@ -35,6 +35,30 @@ std::string narrow(std::wstring_view wide) {
     return out;
 }
 
+// ImmGetCompositionStringW reports byte counts. Query first so a long
+// preedit/result is never truncated to a fixed stack buffer. A failed read
+// must not become an empty commit, which would silently discard input.
+bool read_ime_string(HIMC context, DWORD kind, std::string* out) {
+    constexpr LONG kMaxBytes = 1024 * 1024;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const LONG bytes = ImmGetCompositionStringW(context, kind, nullptr, 0);
+        if (bytes < 0 || bytes > kMaxBytes || bytes % sizeof(wchar_t) != 0) return false;
+        std::wstring wide(static_cast<std::size_t>(bytes) / sizeof(wchar_t), L'\0');
+        if (bytes == 0) {
+            out->clear();
+            return true;
+        }
+        const LONG copied = ImmGetCompositionStringW(context, kind, wide.data(),
+                                                      static_cast<DWORD>(bytes));
+        if (copied < 0 || copied > kMaxBytes || copied % sizeof(wchar_t) != 0) return false;
+        if (copied > bytes) continue; // the composition grew between calls
+        wide.resize(static_cast<std::size_t>(copied) / sizeof(wchar_t));
+        *out = narrow(wide);
+        return true;
+    }
+    return false;
+}
+
 std::wstring widen(std::string_view utf8) {
     if (utf8.empty()) return {};
     const int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
@@ -494,7 +518,6 @@ private:
         case WM_IME_COMPOSITION: {
             HIMC context = ImmGetContext(hwnd);
             if (!context) break;
-            wchar_t buffer[64];
             Event update;
             if (lp & GCS_RESULTSTR) {
                 update.type = EventType::ImeCommit;
@@ -504,16 +527,12 @@ private:
             if (update.type == EventType::ImeCommit || update.type == EventType::ImeUpdate) {
                 const DWORD kind = update.type == EventType::ImeCommit ? GCS_RESULTSTR
                                                                        : GCS_COMPSTR;
-                const LONG bytes = ImmGetCompositionStringW(context, kind, buffer,
-                                                            sizeof(buffer) - sizeof(wchar_t));
-                if (bytes >= 0) {
-                    update.ime_text = narrow(std::wstring_view(
-                        buffer, static_cast<std::size_t>(bytes) / sizeof(wchar_t)));
+                if (read_ime_string(context, kind, &update.ime_text)) {
+                    if (update.type == EventType::ImeCommit) {
+                        native->ime_committed = true;
+                    }
+                    self.emit(*native, update);
                 }
-                if (update.type == EventType::ImeCommit) {
-                    native->ime_committed = true;
-                }
-                self.emit(*native, update);
             }
             ImmReleaseContext(hwnd, context);
             return 0;

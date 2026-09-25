@@ -1085,12 +1085,17 @@ void Shell::handle_pointer(const Event& event) {
     if (event.type == EventType::CaptureLost) {
         if (drag_.window == event.window && drag_.phase != DragPhase::NativeWindow)
             cancel_drag();
+        else if (drag_.phase == DragPhase::Idle)
+            client_.body_event(event, body_bounds(event.window));
         return;
     }
     if (event.type == EventType::PointerUp) {
         const bool was_dragging = drag_.phase == DragPhase::InStrip;
         const Drag completed = drag_;
-        if (drag_.phase == DragPhase::Idle && event.client.y >= strip.height) {
+        // A body edit may have captured the pointer, then released over the
+        // strip or outside the client. It still needs the matching up event
+        // to end selection dragging.
+        if (drag_.phase == DragPhase::Idle) {
             client_.body_event(event, {0, strip.height, event.size.width,
                                        event.size.height - strip.height});
         }
