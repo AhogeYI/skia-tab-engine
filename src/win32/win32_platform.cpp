@@ -258,19 +258,40 @@ public:
         auto it = windows_.find(id);
         if (it == windows_.end() || it->second->in_move_loop) return MoveLoopResult::Unsupported;
         Native& native = *it->second;
+        // ReleaseCapture may itself produce cancellation-related window
+        // messages; it belongs before this native move is marked active.
+        release_pointer();
         native.in_move_loop = true;
         native.move_loop_canceled = false;
+        native.move_loop_escape = false;
         native.move_loop_mouse_up = false;
+        native.move_loop_exited = false;
         native.skip_first_moving = true;
-        release_pointer();
+        // The modal SC_MOVE loop can consume button-up before this HWND sees
+        // it. Observe this UI thread's input queue for the duration, like a
+        // move-loop mouse watcher; never install a global hook.
+        move_hook_native_ = &native;
+        const HHOOK mouse_hook = SetWindowsHookExW(
+            WH_MOUSE, &Win32Platform::move_mouse_hook, nullptr, GetCurrentThreadId());
+        const HHOOK key_hook = SetWindowsHookExW(
+            WH_KEYBOARD, &Win32Platform::move_key_hook, nullptr, GetCurrentThreadId());
         SendMessageW(native.hwnd, WM_SYSCOMMAND, SC_MOVE | 0x0002,
                      static_cast<LPARAM>(GetMessagePos()));
+        if (key_hook) UnhookWindowsHookEx(key_hook);
+        if (mouse_hook) UnhookWindowsHookEx(mouse_hook);
+        move_hook_native_ = nullptr;
         const bool canceled = native.move_loop_canceled;
+        const bool escape = native.move_loop_escape;
         const bool mouse_up = native.move_loop_mouse_up;
+        const bool exited = native.move_loop_exited;
         native.in_move_loop = false;
         native.skip_first_moving = false;
-        if (canceled && !mouse_up) return MoveLoopResult::Canceled;
-        return mouse_up ? MoveLoopResult::Completed : MoveLoopResult::Canceled;
+        // The system's modal move loop normally consumes the button-up itself.
+        // WM_EXITSIZEMOVE is the reliable completion signal in that case.
+        if (escape) return MoveLoopResult::Canceled;
+        if (mouse_up) return MoveLoopResult::Completed;
+        if (canceled) return MoveLoopResult::Canceled;
+        return exited ? MoveLoopResult::Completed : MoveLoopResult::Canceled;
     }
 
     void end_native_move_loop(WindowId id) override {
@@ -302,11 +323,33 @@ private:
         bool ime_committed = false;  // this session produced a result string
         bool in_move_loop = false;
         bool move_loop_canceled = false;
+        bool move_loop_escape = false;
         bool move_loop_mouse_up = false;
+        bool move_loop_exited = false;
         bool skip_first_moving = false;
         bool tracking_mouse = false;
         bool frame_pending = false;
     };
+
+    inline static thread_local Native* move_hook_native_ = nullptr;
+
+    static LRESULT CALLBACK move_mouse_hook(int code, WPARAM wp, LPARAM lp) {
+        if (code == HC_ACTION && move_hook_native_ &&
+            (wp == WM_LBUTTONUP || wp == WM_NCLBUTTONUP ||
+             wp == WM_RBUTTONUP || wp == WM_MBUTTONUP)) {
+            move_hook_native_->move_loop_mouse_up = true;
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+
+    static LRESULT CALLBACK move_key_hook(int code, WPARAM wp, LPARAM lp) {
+        if (code == HC_ACTION && move_hook_native_ && wp == VK_ESCAPE &&
+            (lp & 0x80000000) == 0) {
+            move_hook_native_->move_loop_canceled = true;
+            move_hook_native_->move_loop_escape = true;
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
 
     HWND handle(WindowId id) const {
         auto it = windows_.find(id);
@@ -403,6 +446,7 @@ private:
             }
             break;
         case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
         case WM_MOUSEMOVE:
         case WM_LBUTTONUP: {
             if (native->in_move_loop) {
@@ -415,7 +459,8 @@ private:
             }
             POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ClientToScreen(hwnd, &screen);
-            const EventType type = message == WM_LBUTTONDOWN ? EventType::PointerDown
+            const EventType type = (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK)
+                                     ? EventType::PointerDown
                                   : message == WM_LBUTTONUP ? EventType::PointerUp
                                                             : EventType::PointerMove;
             // Modifier keys ride along so hosts can Ctrl/Shift-click without
@@ -458,6 +503,11 @@ private:
             return 0;
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN: {
+            if (native->in_move_loop && wp == VK_ESCAPE) {
+                native->move_loop_canceled = true;
+                native->move_loop_escape = true;
+                break; // let the system leave its modal move loop
+            }
             const bool alt_held = (GetKeyState(VK_MENU) & 0x8000) != 0;
             self.emit(*native, {EventType::KeyDown, native->id, {}, {}, {},
                                 static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0,
@@ -572,6 +622,7 @@ private:
             }
             return TRUE;
         case WM_EXITSIZEMOVE:
+            if (native->in_move_loop) native->move_loop_exited = true;
             self.emit(*native, {EventType::PlacementChanged});
             break;
         case WM_DPICHANGED: {
