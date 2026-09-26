@@ -1053,6 +1053,25 @@ void Shell::handle_pointer(const Event& event) {
     if (event.type == EventType::PointerMove && drag_.phase == DragPhase::Idle)
         update_hover(event.window, event.client);
     if (event.type == EventType::PointerDown) {
+        if (event.button != PointerButton::Left) {
+            // Non-left presses never press chrome (caption buttons, close,
+            // new tab) and never arm a tab drag. A right-press on a tab
+            // selects it - the product's context menu then targets the
+            // pressed tab - and body presses reach the product untouched.
+            // No pointer capture: the product owns what happens next.
+            hide_hover_card(event.window);
+            if (event.client.y >= strip.height) {
+                client_.body_event(event, {0, strip.height, event.size.width,
+                                           event.size.height - strip.height});
+                return;
+            }
+            if (event.client.x >= strip.caption_start) return;
+            if (event.button == PointerButton::Right) {
+                const TabId id = tab_at(event.window, event.client);
+                if (id) (void)select_tab(event.window, id);
+            }
+            return;
+        }
         const auto visual = visuals_.find(event.window);
         const bool card_hit = visual != visuals_.end() && visual->second.card.showing &&
             visual->second.card.bounds.at(platform_.monotonic_seconds()).contains(event.client);
@@ -1116,6 +1135,16 @@ void Shell::handle_pointer(const Event& event) {
         return;
     }
     if (event.type == EventType::PointerUp) {
+        if (event.button != PointerButton::Left) {
+            // A right/middle release never settles a left-button drag; with
+            // nothing being dragged it still reaches the body (menus may
+            // dismiss or commit on it - the product decides).
+            if (drag_.phase == DragPhase::Idle) {
+                client_.body_event(event, {0, strip.height, event.size.width,
+                                           event.size.height - strip.height});
+            }
+            return;
+        }
         const bool was_dragging = drag_.phase == DragPhase::InStrip;
         const Drag completed = drag_;
         // A body edit may have captured the pointer, then released over the

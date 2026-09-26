@@ -116,6 +116,7 @@ public:
     void body_event(const tabengine::Event& event, tabengine::Rect) override {
         last_body_ctrl = event.ctrl;
         last_body_shift = event.shift;
+        last_body_button = event.button;
         ++body_events_;
     }
     void paint_tab_icon(tabengine::WindowId, tabengine::TabId tab, SkCanvas&,
@@ -136,6 +137,7 @@ public:
     const std::vector<tabengine::TabId>& paint_order() const { return paint_order_; }
     bool last_body_ctrl = false;
     bool last_body_shift = false;
+    tabengine::PointerButton last_body_button = tabengine::PointerButton::Left;
     int body_events() const { return body_events_; }
 
 private:
@@ -161,6 +163,100 @@ void check_body_release_and_capture_loss_reach_client() {
     CHECK(client.body_events() == before + 2);
     platform.emit({tabengine::EventType::CaptureLost, window});
     CHECK(client.body_events() == before + 3);
+}
+
+void check_non_left_pointer_routing() {
+    FakePlatform platform;
+    auto renderer = tabengine::make_skia_raster_renderer();
+    Client client;
+    tabengine::Shell shell(platform, *renderer, client);
+    const auto window = shell.open_window({100, 100, 900, 600});
+    (void)shell.new_tab(window);
+    const auto* tabs = shell.model().window(window);
+    const std::size_t tabs_before = tabs->tabs.size();
+    const auto first = tabs->tabs.front().id;
+    const auto second = tabs->tabs[1].id;
+    (void)shell.select_tab(window, second);
+    tabengine::Rect first_bounds{};
+    for (const auto& target : shell.chrome_targets(window)) {
+        if (target.kind == tabengine::Shell::ChromeTarget::Kind::Tab &&
+            target.tab == first) {
+            first_bounds = target.bounds;
+        }
+    }
+    CHECK(first_bounds.width > 0);
+    const int tab_x = first_bounds.x + first_bounds.width / 2;
+    const int tab_y = first_bounds.y + first_bounds.height / 2;
+
+    // A right press in the body reaches the client with its button.
+    int before = client.body_events();
+    tabengine::Event body_right{tabengine::EventType::PointerDown, window, {300, 300}};
+    body_right.button = tabengine::PointerButton::Right;
+    platform.emit(body_right);
+    CHECK(client.body_events() == before + 1);
+    CHECK(client.last_body_button == tabengine::PointerButton::Right);
+    // So does its release while nothing is being dragged.
+    tabengine::Event body_right_up{tabengine::EventType::PointerUp, window, {300, 300}};
+    body_right_up.button = tabengine::PointerButton::Right;
+    platform.emit(body_right_up);
+    CHECK(client.body_events() == before + 2);
+    // A middle press in the body rides the same plumbing.
+    tabengine::Event body_middle{tabengine::EventType::PointerDown, window, {300, 300}};
+    body_middle.button = tabengine::PointerButton::Middle;
+    platform.emit(body_middle);
+    CHECK(client.body_events() == before + 3);
+    CHECK(client.last_body_button == tabengine::PointerButton::Middle);
+
+    // A right press on the inactive tab selects it but arms no drag: a move
+    // far beyond the slop reorders nothing, and no tab tears off.
+    before = client.body_events();
+    tabengine::Event tab_right{tabengine::EventType::PointerDown, window,
+                               {tab_x, tab_y}};
+    tab_right.button = tabengine::PointerButton::Right;
+    platform.emit(tab_right);
+    CHECK(client.body_events() == before); // strip press, not a body event
+    CHECK(shell.model().window(window)->active == first);
+    platform.emit({tabengine::EventType::PointerMove, window,
+                   {tab_x + 120, tab_y}, {tab_x + 220, tab_y}});
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before);
+    CHECK(shell.model().window(window)->tabs.front().id == first);
+    CHECK(shell.model().window_ids().size() == 1);
+
+    // Right-pressing chrome does nothing: no caption button, no new tab.
+    const auto windows_before = shell.model().window_ids().size();
+    tabengine::Event caption_right{tabengine::EventType::PointerDown, window,
+                                   {880, 12}};
+    caption_right.button = tabengine::PointerButton::Right;
+    platform.emit(caption_right);
+    const auto strip = tabengine::Layout::tab_strip(900, tabs_before, 1.0f);
+    tabengine::Event plus_right{
+        tabengine::EventType::PointerDown, window,
+        {strip.new_tab.x + strip.new_tab.width / 2,
+         strip.new_tab.y + strip.new_tab.height / 2}};
+    plus_right.button = tabengine::PointerButton::Right;
+    platform.emit(plus_right);
+    CHECK(shell.model().window_ids().size() == windows_before);
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before);
+    CHECK(client.body_events() == before);
+
+    // A right release during an armed left drag does not settle it: the
+    // drag visual keeps following moves until the left release.
+    (void)shell.select_tab(window, second);
+    platform.emit({tabengine::EventType::PointerDown, window, {tab_x, tab_y},
+                   {tab_x + 100, tab_y + 100}});
+    platform.emit({tabengine::EventType::PointerMove, window,
+                   {tab_x + 60, tab_y}, {tab_x + 160, tab_y + 100}});
+    tabengine::Event stray_up{tabengine::EventType::PointerUp, window,
+                              {tab_x + 60, tab_y}};
+    stray_up.button = tabengine::PointerButton::Right;
+    platform.emit(stray_up);
+    const int invalidated = platform.invalidations();
+    platform.emit({tabengine::EventType::PointerMove, window,
+                   {tab_x + 90, tab_y}, {tab_x + 190, tab_y + 100}});
+    CHECK(platform.invalidations() > invalidated);
+    platform.emit({tabengine::EventType::PointerUp, window,
+                   {tab_x + 90, tab_y}, {tab_x + 190, tab_y + 100}});
+    CHECK(shell.model().window(window)->tabs.size() == tabs_before);
 }
 
 void check_shift_modified_chords_reach_the_client() {
@@ -417,5 +513,6 @@ int main() {
     check_hover_paint_order();
     check_shift_modified_chords_reach_the_client();
     check_body_release_and_capture_loss_reach_client();
+    check_non_left_pointer_routing();
     return 0;
 }

@@ -37,6 +37,10 @@ if(WIN32)
         add_executable(tabengine_ime_test tests/ime_test.cpp)
         target_link_libraries(tabengine_ime_test PRIVATE tabengine_win32)
         add_test(NAME tabengine_ime_test COMMAND tabengine_ime_test)
+
+        add_executable(tabengine_pointer_button_test tests/pointer_button_test.cpp)
+        target_link_libraries(tabengine_pointer_button_test PRIVATE tabengine_win32)
+        add_test(NAME tabengine_pointer_button_test COMMAND tabengine_pointer_button_test)
     endif()
 endif()
 

@@ -23,6 +23,10 @@ enum class EventType {
 
 enum class MoveLoopResult { Unsupported, Completed, Canceled };
 
+// Which physical pointer button produced a pointer press or release. Moves
+// carry the button currently held (None while hovering with no button down).
+enum class PointerButton : unsigned char { None, Left, Right, Middle };
+
 struct Event {
     EventType type;
     WindowId window = 0;
@@ -46,6 +50,10 @@ struct Event {
     // string, UTF-8. An empty ImeUpdate means the preedit emptied; clients
     // replace their preview with the string verbatim.
     std::string ime_text;
+    // PointerDown/PointerUp: the physical button of this press/release.
+    // PointerMove: the held button (None when hovering). Left by default so
+    // plain presses and simple injection sites stay left clicks.
+    PointerButton button = PointerButton::Left;
 };
 
 // UTF-16 backends receive an astral character as a high + low surrogate pair

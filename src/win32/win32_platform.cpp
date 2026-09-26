@@ -447,10 +447,21 @@ private:
             break;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONDBLCLK:
         case WM_MOUSEMOVE:
-        case WM_LBUTTONUP: {
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP: {
             if (native->in_move_loop) {
-                if (message == WM_LBUTTONUP) native->move_loop_mouse_up = true;
+                // Any button release ends the system's modal move loop;
+                // presses and moves belong to the loop, not the host.
+                if (message == WM_LBUTTONUP || message == WM_RBUTTONUP ||
+                    message == WM_MBUTTONUP) {
+                    native->move_loop_mouse_up = true;
+                }
                 return 0;
             }
             if (message == WM_MOUSEMOVE && !native->tracking_mouse) {
@@ -459,26 +470,40 @@ private:
             }
             POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ClientToScreen(hwnd, &screen);
-            const EventType type = (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK)
-                                     ? EventType::PointerDown
-                                  : message == WM_LBUTTONUP ? EventType::PointerUp
-                                                            : EventType::PointerMove;
-            // Modifier keys ride along so hosts can Ctrl/Shift-click without
-            // touching Win32 themselves; same source as KeyDown.
-            self.emit(*native, {type, native->id,
-                                {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)},
-                                {screen.x, screen.y}, {},
-                                0, (GetKeyState(VK_CONTROL) & 0x8000) != 0,
-                                (GetKeyState(VK_SHIFT) & 0x8000) != 0});
+            const PointerButton button =
+                message == WM_MOUSEMOVE
+                    ? ((wp & MK_LBUTTON) ? PointerButton::Left
+                       : (wp & MK_RBUTTON) ? PointerButton::Right
+                       : (wp & MK_MBUTTON) ? PointerButton::Middle
+                                           : PointerButton::None)
+                    : message == WM_RBUTTONDOWN || message == WM_RBUTTONDBLCLK ||
+                              message == WM_RBUTTONUP
+                        ? PointerButton::Right
+                        : message == WM_MBUTTONDOWN || message == WM_MBUTTONDBLCLK ||
+                                  message == WM_MBUTTONUP
+                              ? PointerButton::Middle
+                              : PointerButton::Left;
+            const bool is_press =
+                message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK ||
+                message == WM_RBUTTONDOWN || message == WM_RBUTTONDBLCLK ||
+                message == WM_MBUTTONDOWN || message == WM_MBUTTONDBLCLK;
+            const EventType type =
+                message == WM_MOUSEMOVE ? EventType::PointerMove
+                : is_press              ? EventType::PointerDown
+                                         : EventType::PointerUp;
+            // Returning 0 keeps right-button releases away from
+            // DefWindowProc, so no WM_CONTEXTMENU is synthesized: the
+            // product owns context menus.
+            Event pointer;
+            pointer.type = type;
+            pointer.client = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            pointer.screen = {screen.x, screen.y};
+            pointer.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            pointer.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            pointer.button = button;
+            self.emit(*native, pointer);
             return 0;
         }
-        case WM_RBUTTONUP:
-        case WM_MBUTTONUP:
-            if (native->in_move_loop) {
-                native->move_loop_mouse_up = true;
-                return 0;
-            }
-            break;
         case WM_MOUSELEAVE:
             native->tracking_mouse = false;
             self.emit(*native, {EventType::PointerLeave});
