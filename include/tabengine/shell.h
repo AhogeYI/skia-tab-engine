@@ -62,6 +62,11 @@ public:
 
 class Shell {
 public:
+    struct ChromeTarget {
+        enum class Kind { Tab, CloseTab, NewTab } kind = Kind::Tab;
+        TabId tab = 0;
+        Rect bounds{}; // client pixels, including current animation position
+    };
     Shell(IPlatform& platform, IRenderer& renderer, IClient& client);
     ~Shell();
     Shell(const Shell&) = delete;
@@ -79,6 +84,8 @@ public:
     void close_window(WindowId window);
     void on_event(const Event& event);
     [[nodiscard]] const Model& model() const { return model_; }
+    // Read-only hit targets for accessibility and runtime automation.
+    [[nodiscard]] std::vector<ChromeTarget> chrome_targets(WindowId window) const;
     void set_theme(Theme theme);
     void set_chrome_options(ChromeOptions options);
 

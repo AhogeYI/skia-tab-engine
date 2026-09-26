@@ -584,6 +584,32 @@ StripLayout Shell::layout(WindowId window) const {
                              platform_.scale(window), chrome_options_);
 }
 
+std::vector<Shell::ChromeTarget> Shell::chrome_targets(WindowId window) const {
+    std::vector<ChromeTarget> targets;
+    const WindowTabs* w = model_.window(window);
+    if (!w) return targets;
+    const StripLayout strip = layout(window);
+    const float scale = platform_.scale(window);
+    for (std::size_t i = 0; i < w->tabs.size() && i < strip.tabs.size(); ++i) {
+        const Tab& tab = w->tabs[i];
+        const Rect rect = visual_tab_bounds(window, tab.id, strip.tabs[i]);
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        targets.push_back({ChromeTarget::Kind::Tab, tab.id, rect});
+        if ((tab.id == w->active && rect.width >=
+             static_cast<int>(detail::ChromeMetrics::min_active_width * scale)) ||
+            rect.width >= static_cast<int>(detail::ChromeMetrics::close_hide_width * scale)) {
+            const int left = rect.right() - static_cast<int>(37 * scale);
+            const int right = rect.right() - static_cast<int>(13 * scale);
+            targets.push_back({ChromeTarget::Kind::CloseTab, tab.id,
+                               {left, rect.y, std::max(0, right - left), rect.height}});
+        }
+    }
+    const Rect new_tab = visual_new_tab_bounds(window, strip);
+    if (new_tab.width > 0 && new_tab.height > 0)
+        targets.push_back({ChromeTarget::Kind::NewTab, 0, new_tab});
+    return targets;
+}
+
 Rect Shell::body_bounds(WindowId window) const {
     const Size size = platform_.client_size(window);
     const int top = layout(window).height;
