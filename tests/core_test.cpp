@@ -34,7 +34,7 @@ int main() {
     CHECK(layout.tabs.size() == 3);
     CHECK(layout.height == 41);
     CHECK(layout.leading_slot.width == 36);
-    CHECK(layout.caption_start == 863); // 3 × 45dp + two 1dp gaps
+    CHECK(layout.caption_start == 863); // Three 45dp buttons plus two 1dp gaps.
     CHECK(layout.tabs[0].x == 36);
     CHECK(layout.tabs[0].width == 256);
     CHECK(layout.tabs[1].x == 274); // 18dp layout overlap

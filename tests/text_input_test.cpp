@@ -192,10 +192,10 @@ void check_shell_forwards_ime_to_body() {
     const std::size_t tabs_before = shell.model().window(window)->tabs.size();
 
     Event update{EventType::ImeUpdate, window};
-    update.ime_text = "ä½ å¥½"; // ni hao
+    update.ime_text = "\xE4\xBD\xA0\xE5\xA5\xBD"; // UTF-8 for "ni hao".
     platform.emit(update);
     Event commit{EventType::ImeCommit, window};
-    commit.ime_text = "ä½ å¥½";
+    commit.ime_text = "\xE4\xBD\xA0\xE5\xA5\xBD";
     platform.emit(commit);
     platform.emit({EventType::ImeCancel, window});
     platform.emit({EventType::ImeStart, window});
@@ -205,7 +205,7 @@ void check_shell_forwards_ime_to_body() {
     CHECK(client.ime_events[1].first == EventType::ImeCommit);
     CHECK(client.ime_events[2].first == EventType::ImeCancel);
     CHECK(client.ime_events[3].first == EventType::ImeStart);
-    CHECK(client.ime_events[0].second == "ä½ å¥½");
+    CHECK(client.ime_events[0].second == "\xE4\xBD\xA0\xE5\xA5\xBD");
     CHECK(client.shortcuts == 0);
     CHECK(client.ime_body_height > 0);
     CHECK(shell.model().window(window)->tabs.size() == tabs_before);
