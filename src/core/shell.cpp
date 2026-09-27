@@ -190,6 +190,14 @@ Shell::~Shell() {
     }
 }
 
+void Shell::set_body_drag(WindowId window, bool active) {
+    if (active) {
+        body_drag_.insert(window);
+    } else {
+        body_drag_.erase(window);
+    }
+}
+
 void Shell::set_theme(Theme theme) {
     theme_ = theme;
     for (WindowId id : model_.window_ids()) platform_.invalidate(id);
@@ -408,6 +416,7 @@ void Shell::destroy_window_contents(WindowId window) {
         if (drag_.phase != DragPhase::NativeWindow) platform_.release_pointer();
         drag_ = {};
     }
+    body_drag_.erase(window);
     clear_hover(window);
     if (active) client_.active_tab_changed(window, active, 0);
     for (const Tab& tab : tabs) {
@@ -1165,6 +1174,11 @@ void Shell::handle_pointer(const Event& event) {
         if (event.client.y >= strip.height) {
             client_.body_event(event, {0, strip.height, event.size.width,
                                        event.size.height - strip.height});
+        } else if (body_drag_.count(event.window) != 0) {
+            // A client-owned body drag is hovering the tab strip: the move
+            // still belongs to the gesture (drop-on-tab targets), while the
+            // hover pass above keeps the tab highlight alive.
+            client_.body_event(event, body_bounds(event.window));
         }
         return;
     }

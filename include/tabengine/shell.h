@@ -86,6 +86,15 @@ public:
     [[nodiscard]] const Model& model() const { return model_; }
     // Read-only hit targets for accessibility and runtime automation.
     [[nodiscard]] std::vector<ChromeTarget> chrome_targets(WindowId window) const;
+    // Declares that the client is running a pointer drag that started in the
+    // body (the client captured the pointer). While active, pointer moves
+    // over the tab strip are forwarded to IClient::body_event instead of
+    // being dropped, so a body drag can hover and drop onto another tab;
+    // strip hover feedback keeps updating. The client clears the flag on
+    // release, cancel or capture loss. Purely event routing: the engine
+    // starts no drags of its own while the flag is set (the button is
+    // already held by the client's gesture).
+    void set_body_drag(WindowId window, bool active);
     void set_theme(Theme theme);
     void set_chrome_options(ChromeOptions options);
 
@@ -187,6 +196,9 @@ private:
     bool hover_new_tab_ = false;
     int hover_caption_ = -1;
     Drag drag_;
+    // Windows whose client declared an in-body pointer drag (see
+    // set_body_drag); strip-area moves forward to the body for these only.
+    std::unordered_set<WindowId> body_drag_;
     std::vector<WindowId> pending_destroy_;
     std::unordered_set<WindowId> busy_windows_;
     std::unordered_map<WindowId, WindowVisual> visuals_;

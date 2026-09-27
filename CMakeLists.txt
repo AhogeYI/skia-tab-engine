@@ -94,6 +94,12 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_link_libraries(tabengine_text_input_test PRIVATE tabengine_skia)
         add_test(NAME tabengine_text_input_test COMMAND tabengine_text_input_test)
 
+        add_executable(tabengine_body_drag_test tests/body_drag_test.cpp)
+        target_include_directories(tabengine_body_drag_test PRIVATE "${TABENGINE_SKIA_ROOT}")
+        target_compile_definitions(tabengine_body_drag_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
+        target_link_libraries(tabengine_body_drag_test PRIVATE tabengine_skia)
+        add_test(NAME tabengine_body_drag_test COMMAND tabengine_body_drag_test)
+
         add_executable(tabengine_windows_renderer_test tests/windows_renderer_test.cpp)
         target_compile_definitions(tabengine_windows_renderer_test PRIVATE UNICODE _UNICODE)
         target_include_directories(tabengine_windows_renderer_test PRIVATE "${TABENGINE_SKIA_ROOT}")
