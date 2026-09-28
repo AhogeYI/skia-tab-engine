@@ -330,8 +330,9 @@ def verify(config: str) -> None:
     archive = ROOT / "dist" / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
     if not archive.is_file():
         raise SystemExit(f"SDK archive is missing: {archive}")
-    (ROOT / "build").mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="sdk-verify-", dir=ROOT / "build") as temp:
+    # Extract outside the TabEngine checkout so the packaged example cannot
+    # accidentally depend on an in-tree header, library, or relative path.
+    with tempfile.TemporaryDirectory(prefix="sdk-verify-", dir=ROOT.parent) as temp:
         with zipfile.ZipFile(archive) as bundle:
             bundle.extractall(temp)
         stage = Path(temp) / archive.stem
@@ -359,6 +360,11 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
         path = stage / relative
         if not path.is_file() or hash_file(path) != expected:
             raise SystemExit(f"SDK file mismatch: {relative}")
+    for relative in ("README.md", "docs/SDK_USER_GUIDE.md",
+                     "docs/API_REFERENCE.md", "examples/sdk_hello_tabs/CMakeLists.txt",
+                     "examples/sdk_hello_tabs/main.cpp"):
+        if not (stage / relative).is_file():
+            raise SystemExit(f"SDK developer resource is missing: {relative}")
     consumer_src = build.parent / "consumer-src"
     shutil.copytree(ROOT / "tests" / "sdk_consumer", consumer_src)
     run("cmake", "-S", str(consumer_src), "-B", str(build),
@@ -369,6 +375,17 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
     env["PATH"] = str(stage / "bin") + os.pathsep + env.get("PATH", "")
     run(str(exe), env=env)
     print("SDK external consumer passed")
+
+    # The public example must also build and run from the extracted package,
+    # without reaching back to this repository's headers or libraries.
+    example_source = stage / "examples" / "sdk_hello_tabs"
+    example_build = build.parent / "example-build"
+    run("cmake", "-S", str(example_source), "-B", str(example_build),
+        "-G", "Visual Studio 18 2026", "-A", "x64",
+        f"-DTABENGINE_SDK_ROOT={stage}")
+    run("cmake", "--build", str(example_build), "--config", config)
+    run(str(example_build / config / "tabengine_hello_tabs.exe"), "--smoke", env=env)
+    print("SDK packaged example passed")
 
 
 def main() -> None:

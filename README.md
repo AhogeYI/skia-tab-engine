@@ -45,8 +45,11 @@ For a library-only Windows build, set `TABENGINE_BUILD_SKIA=ON` and `TABENGINE_B
 
 ## Windows SDK build and local release artifacts
 
-For the complete maintainer and consumer workflow, including incremental
-repackaging, CMake integration, validation, and troubleshooting, see
+If you have only the extracted SDK, start with the bundled `README.md`,
+[SDK user guide](docs/SDK_USER_GUIDE.md), and
+[API reference](docs/API_REFERENCE.md). The SDK includes a complete CMake
+application under `examples/sdk_hello_tabs` that builds without this source
+repository. Maintainers building or changing the SDK should use the
 [SDK development guide](docs/SDK_DEVELOPMENT.md).
 
 TabEngine owns the pinned Skia source revision in `third_party/SKIA_REVISION.txt` and the shared-library GN configuration in `cmake/skia_shared_args.gn`. Its SDK builder fetches only the pinned Skia dependencies, checks their revisions against Skia's `DEPS`, builds `skia.dll`, builds the TabEngine libraries, and packages them together. This is separate from the older static-Skia workbench build above.
@@ -60,7 +63,7 @@ The archives are `dist/tabengine-sdk-0.1.0-windows-x64-debug.zip` and `dist/tabe
 
 Each archive contains TabEngine static libraries, the pinned Skia DLL and import library, compatible public headers, a relocatable CMake package, third-party license notices, and a SHA-256 manifest. The build installs a single aggregate `TabEngine::SDK` target. It propagates the bundled Skia headers, `SKIA_DLL` definition, and import-library link. `TabEngine::FreeType` exposes the matching FreeType, libpng, and zlib static libraries from the same build for hosts that need a font engine such as RmlUi. Applications can still use Skia APIs directly, but do not run GN or select a separate Skia package. Deploy `bin/skia.dll` beside the application executable. The normal Windows/Visual C++ runtime remains a platform prerequisite; Debug binaries require the matching development runtime.
 
-The `verify` action extracts the zip to a new directory, copies a small consumer outside the source tree, then builds and runs that consumer using only `find_package(TabEngine CONFIG REQUIRED)`, `TabEngine::SDK`, and `TabEngine::FreeType`. The consumer exercises Skia drawing, TabEngine text drawing, FreeType initialization, and the Win32 platform/renderer factories. The SDK's `manifest.json` records the Skia and external revisions, GN argument hash, build configuration, and every packaged file hash. Debug and Release SDKs are separate and must not be mixed. TabEngine still offers source compatibility rather than a stable cross-toolchain C++ ABI; rebuild consumers when updating the SDK.
+The `verify` action extracts the zip to a new directory, copies a small consumer outside the source tree, then builds and runs it using only `find_package(TabEngine CONFIG REQUIRED)`, `TabEngine::SDK`, and `TabEngine::FreeType`. It also builds and runs the complete example directly from the extracted SDK, without TabEngine source files. These checks exercise Skia drawing, TabEngine text drawing, FreeType initialization, Win32 platform/renderer factories, and application callbacks. The SDK's `manifest.json` records the Skia and external revisions, GN argument hash, build configuration, and every packaged file hash. Debug and Release SDKs are separate and must not be mixed. TabEngine still offers source compatibility rather than a stable cross-toolchain C++ ABI; rebuild consumers when updating the SDK.
 
 These are local release artifacts. A public release still requires choosing a license for TabEngine itself and validating distribution notices. File Manager now consumes this installed SDK through its CMake package.
 

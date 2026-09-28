@@ -135,7 +135,8 @@ prove the provenance of an arbitrary `--skia-root` path.
 
 Each ZIP contains one top-level directory with a relocatable SDK root. The
 root contains `manifest.json`, `bin/skia.dll`, `lib/`, `include/tabengine/`,
-`skia/`, `licenses/`, and `lib/cmake/TabEngine/`. Extract the archive and point
+`skia/`, `docs/`, `examples/sdk_hello_tabs/`, `licenses/`, and
+`lib/cmake/TabEngine/`. Extract the archive and point
 the consumer at that root, not at its parent directory or at the ZIP itself.
 
 The CMake package provides:
@@ -185,7 +186,8 @@ python tools/sdk.py verify --config Release
 ```
 
 `verify` extracts the ZIP into a temporary location, checks every file listed
-in `manifest.json`, builds an external CMake consumer, and runs it. If a
+in `manifest.json`, builds an external CMake consumer, then builds and runs the
+packaged `sdk_hello_tabs` example without source-tree inputs. If a
 symbols ZIP exists, it also checks its reference to the SDK ZIP hash and its
 PDB hashes. It does **not** compare the SDK against a separately committed
 expected ZIP hash, certify the compiler ABI, or publish the artifact. A
