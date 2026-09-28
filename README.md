@@ -45,6 +45,10 @@ For a library-only Windows build, set `TABENGINE_BUILD_SKIA=ON` and `TABENGINE_B
 
 ## Windows SDK build and local release artifacts
 
+For the complete maintainer and consumer workflow, including incremental
+repackaging, CMake integration, validation, and troubleshooting, see
+[SDK development guide](docs/SDK_DEVELOPMENT.md).
+
 TabEngine owns the pinned Skia source revision in `third_party/SKIA_REVISION.txt` and the shared-library GN configuration in `cmake/skia_shared_args.gn`. Its SDK builder fetches only the pinned Skia dependencies, checks their revisions against Skia's `DEPS`, builds `skia.dll`, builds the TabEngine libraries, and packages them together. This is separate from the older static-Skia workbench build above.
 
 ```powershell
@@ -58,7 +62,7 @@ Each archive contains TabEngine static libraries, the pinned Skia DLL and import
 
 The `verify` action extracts the zip to a new directory, copies a small consumer outside the source tree, then builds and runs that consumer using only `find_package(TabEngine CONFIG REQUIRED)`, `TabEngine::SDK`, and `TabEngine::FreeType`. The consumer exercises Skia drawing, TabEngine text drawing, FreeType initialization, and the Win32 platform/renderer factories. The SDK's `manifest.json` records the Skia and external revisions, GN argument hash, build configuration, and every packaged file hash. Debug and Release SDKs are separate and must not be mixed. TabEngine still offers source compatibility rather than a stable cross-toolchain C++ ABI; rebuild consumers when updating the SDK.
 
-These are local release artifacts. A public release still requires choosing a license for TabEngine itself and validating distribution notices. No File Manager build path is changed by this SDK work.
+These are local release artifacts. A public release still requires choosing a license for TabEngine itself and validating distribution notices. File Manager now consumes this installed SDK through its CMake package.
 
 When working in the the development workspace workspace, select **TabEngine (vs-debug)** in VS Code's Run and Debug menu and press F5. Its pre-launch task configures and builds the demo in `tab-engine/build/vs-debug` using the workspace's Skia package.
 
