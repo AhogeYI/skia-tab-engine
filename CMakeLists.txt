@@ -6,7 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(tabengine_core STATIC src/core/model.cpp src/core/layout.cpp src/core/theme.cpp)
-target_include_directories(tabengine_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(tabengine_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+set_target_properties(tabengine_core PROPERTIES EXPORT_NAME Core)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -17,6 +20,7 @@ endif()
 
 option(TABENGINE_BUILD_WIN32_DEMO "Build the Win32 Skia reference host" OFF)
 option(TABENGINE_BUILD_SKIA "Build the Windows Skia shell and renderer libraries" OFF)
+option(TABENGINE_INSTALL_SDK "Install a redistributable Windows SDK with a bundled Skia DLL" OFF)
 set(TABENGINE_SKIA_ROOT "" CACHE PATH "Path to a Skia source or binary package root")
 
 if(TABENGINE_BUILD_WIN32_DEMO)
@@ -25,7 +29,10 @@ endif()
 
 if(WIN32)
     add_library(tabengine_win32 STATIC src/win32/win32_platform.cpp)
-    target_include_directories(tabengine_win32 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_include_directories(tabengine_win32 PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    set_target_properties(tabengine_win32 PROPERTIES EXPORT_NAME Win32)
     target_compile_definitions(tabengine_win32 PRIVATE UNICODE _UNICODE)
     target_link_libraries(tabengine_win32 PUBLIC tabengine_core user32 dwmapi)
 
@@ -55,17 +62,59 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     endif()
     add_library(tabengine_skia STATIC src/core/shell.cpp src/skia/raster_renderer.cpp
         src/skia/d3d12_renderer.cpp src/skia/win32_text.cpp)
-    target_include_directories(tabengine_skia PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_include_directories(tabengine_skia PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    set_target_properties(tabengine_skia PROPERTIES EXPORT_NAME SkiaShell)
     target_include_directories(tabengine_skia PRIVATE "${TABENGINE_SKIA_ROOT}")
     target_compile_definitions(tabengine_skia PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
     target_link_libraries(tabengine_skia PUBLIC tabengine_core)
-    target_link_libraries(tabengine_skia PUBLIC "${TABENGINE_SKIA_ROOT}/lib/skia.lib"
+    set(_tabengine_skia_dll "${TABENGINE_SKIA_ROOT}/bin/skia.dll")
+    if(EXISTS "${_tabengine_skia_dll}")
+        add_library(TabEngine::Skia SHARED IMPORTED GLOBAL)
+        set_target_properties(TabEngine::Skia PROPERTIES
+            IMPORTED_IMPLIB "${TABENGINE_SKIA_ROOT}/lib/skia.lib"
+            IMPORTED_LOCATION "${_tabengine_skia_dll}"
+            INTERFACE_INCLUDE_DIRECTORIES "${TABENGINE_SKIA_ROOT}"
+            INTERFACE_COMPILE_DEFINITIONS SKIA_DLL)
+        target_link_libraries(tabengine_skia PUBLIC TabEngine::Skia)
+    else()
+        target_link_libraries(tabengine_skia PUBLIC "${TABENGINE_SKIA_ROOT}/lib/skia.lib")
+        foreach(component IN ITEMS d3d12allocator libpng skcms spirv_cross zlib)
+            if(EXISTS "${TABENGINE_SKIA_ROOT}/lib/${component}.lib")
+                target_link_libraries(tabengine_skia PUBLIC "${TABENGINE_SKIA_ROOT}/lib/${component}.lib")
+            endif()
+        endforeach()
+    endif()
+    target_link_libraries(tabengine_skia PUBLIC
         d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 uuid dwrite usp10 gdi32)
-    foreach(component IN ITEMS d3d12allocator libpng skcms spirv_cross zlib)
-        if(EXISTS "${TABENGINE_SKIA_ROOT}/lib/${component}.lib")
-            target_link_libraries(tabengine_skia PUBLIC "${TABENGINE_SKIA_ROOT}/lib/${component}.lib")
+
+    if(TABENGINE_INSTALL_SDK)
+        if(NOT TARGET TabEngine::Skia)
+            message(FATAL_ERROR "TABENGINE_INSTALL_SDK requires a shared Skia package with bin/skia.dll")
         endif()
-    endforeach()
+        include(CMakePackageConfigHelpers)
+        install(TARGETS tabengine_core tabengine_win32 tabengine_skia
+            EXPORT TabEngineTargets ARCHIVE DESTINATION lib)
+        install(EXPORT TabEngineTargets FILE TabEngineTargets.cmake
+            NAMESPACE TabEngine:: DESTINATION lib/cmake/TabEngine)
+        install(DIRECTORY include/ DESTINATION include)
+        install(DIRECTORY "${TABENGINE_SKIA_ROOT}/include" DESTINATION skia)
+        install(DIRECTORY "${TABENGINE_SKIA_ROOT}/modules" DESTINATION skia OPTIONAL)
+        install(DIRECTORY "${TABENGINE_SKIA_ROOT}/third_party" DESTINATION skia OPTIONAL)
+        install(FILES "${TABENGINE_SKIA_ROOT}/lib/skia.lib" DESTINATION lib)
+        install(FILES "${_tabengine_skia_dll}" DESTINATION bin)
+        configure_package_config_file(cmake/TabEngineConfig.cmake.in
+            "${CMAKE_CURRENT_BINARY_DIR}/TabEngineConfig.cmake"
+            INSTALL_DESTINATION lib/cmake/TabEngine)
+        write_basic_package_version_file(
+            "${CMAKE_CURRENT_BINARY_DIR}/TabEngineConfigVersion.cmake"
+            VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+        install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/TabEngineConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/TabEngineConfigVersion.cmake"
+            DESTINATION lib/cmake/TabEngine)
+    endif()
 
     if(TABENGINE_BUILD_WIN32_DEMO)
         add_executable(tabengine_win32_demo WIN32 examples/win32_demo.cpp)
@@ -107,4 +156,8 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_link_libraries(tabengine_windows_renderer_test PRIVATE tabengine_skia user32)
         add_test(NAME tabengine_windows_renderer_test COMMAND tabengine_windows_renderer_test)
     endif()
+endif()
+
+if(TABENGINE_INSTALL_SDK AND NOT TABENGINE_BUILD_SKIA)
+    message(FATAL_ERROR "TABENGINE_INSTALL_SDK requires TABENGINE_BUILD_SKIA=ON")
 endif()

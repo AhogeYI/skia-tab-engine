@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+if(NOT WIN32)
+    message(FATAL_ERROR "This TabEngine SDK contains Windows binaries only")
+endif()
+
+if(NOT TARGET TabEngine::Skia)
+    add_library(TabEngine::Skia SHARED IMPORTED)
+    set_target_properties(TabEngine::Skia PROPERTIES
+        IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/lib/skia.lib"
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/bin/skia.dll"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/skia"
+        INTERFACE_COMPILE_DEFINITIONS SKIA_DLL)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/TabEngineTargets.cmake")
+
+if(NOT TARGET TabEngine::SDK)
+    add_library(TabEngine::SDK INTERFACE IMPORTED)
+    set_target_properties(TabEngine::SDK PROPERTIES
+        INTERFACE_LINK_LIBRARIES "TabEngine::SkiaShell;TabEngine::Win32")
+endif()
+
+check_required_components(TabEngine)
