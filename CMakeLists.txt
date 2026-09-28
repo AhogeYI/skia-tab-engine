@@ -103,6 +103,11 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/modules" DESTINATION skia OPTIONAL)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/third_party" DESTINATION skia OPTIONAL)
         install(FILES "${TABENGINE_SKIA_ROOT}/lib/skia.lib" DESTINATION lib)
+        install(FILES
+            "${TABENGINE_SKIA_ROOT}/lib/freetype2.lib"
+            "${TABENGINE_SKIA_ROOT}/lib/libpng.lib"
+            "${TABENGINE_SKIA_ROOT}/lib/zlib.lib"
+            DESTINATION lib)
         install(FILES "${_tabengine_skia_dll}" DESTINATION bin)
         configure_package_config_file(cmake/TabEngineConfig.cmake.in
             "${CMAKE_CURRENT_BINARY_DIR}/TabEngineConfig.cmake"

@@ -13,6 +13,14 @@ if(NOT TARGET TabEngine::Skia)
         INTERFACE_COMPILE_DEFINITIONS SKIA_DLL)
 endif()
 
+if(NOT TARGET TabEngine::FreeType)
+    add_library(TabEngine::FreeType STATIC IMPORTED)
+    set_target_properties(TabEngine::FreeType PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/freetype2.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/skia/third_party/freetype/include"
+        INTERFACE_LINK_LIBRARIES "${PACKAGE_PREFIX_DIR}/lib/libpng.lib;${PACKAGE_PREFIX_DIR}/lib/zlib.lib")
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/TabEngineTargets.cmake")
 
 if(NOT TARGET TabEngine::SDK)

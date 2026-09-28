@@ -8,6 +8,9 @@
 #include "include/core/SkSurface.h"
 #include "include/effects/SkImageFilters.h"
 
+#include <ft2build.h>
+#include FT_FREETYPE_H
+
 int main() {
     auto surface = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(80, 32));
     if (!surface) {
@@ -24,5 +27,13 @@ int main() {
     }
     auto platform = tabengine::make_win32_platform();
     auto renderer = tabengine::make_skia_raster_renderer();
-    return platform && renderer ? 0 : 3;
+    if (!platform || !renderer) {
+        return 3;
+    }
+    FT_Library library = nullptr;
+    if (FT_Init_FreeType(&library) != 0) {
+        return 4;
+    }
+    FT_Done_FreeType(library);
+    return 0;
 }

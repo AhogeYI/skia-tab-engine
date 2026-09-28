@@ -126,6 +126,18 @@ def msbuild_path() -> Path:
     raise SystemExit("MSBuild was not found; install Visual Studio with C++ build tools")
 
 
+def librarian_path() -> Path:
+    found = shutil.which("lib.exe")
+    if found:
+        return Path(found)
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if vswhere.is_file():
+        result = capture(str(vswhere), "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-find", r"VC\Tools\MSVC\*\bin\Hostx64\x64\lib.exe")
+        if result:
+            return Path(result.splitlines()[0])
+    raise SystemExit("MSVC lib.exe was not found")
+
+
 def skia_output(config: str) -> Path:
     return SKIA / "out" / f"tabengine-{config.lower()}-shared"
 
@@ -201,6 +213,22 @@ def build_skia(config: str) -> Path:
     (package / "lib").mkdir(parents=True, exist_ok=True)
     shutil.copy2(dll, package / "bin" / "skia.dll")
     shutil.copy2(library, package / "lib" / "skia.lib")
+    for component in ("freetype2", "libpng"):
+        shutil.copy2(locate_artifact(output, (f"{component}.lib",)),
+                     package / "lib" / f"{component}.lib")
+    # GN leaves zlib's SIMD source sets outside zlib.lib because skia.dll links
+    # their objects directly. Repack them so SDK consumers can link FreeType
+    # and libpng without reaching into the Skia build tree.
+    zlib_objects = (
+        "zlib_adler32_simd.adler32_simd.obj",
+        "zlib_crc32_simd.crc32_simd.obj",
+        "zlib_crc32_simd.crc_folding.obj",
+        "zlib_inflate_chunk_simd.inffast_chunk.obj",
+        "zlib_inflate_chunk_simd.inflate.obj",
+    )
+    run(str(librarian_path()), "/NOLOGO", f"/OUT:{package / 'lib' / 'zlib.lib'}",
+        str(locate_artifact(output, ("zlib.lib",))),
+        *(str(locate_artifact(output, (name,))) for name in zlib_objects))
     symbol_file = output / "skia.dll.pdb"
     if symbol_file.is_file():
         (package / "symbols").mkdir(parents=True, exist_ok=True)
