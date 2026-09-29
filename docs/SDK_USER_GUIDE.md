@@ -18,6 +18,8 @@ After extraction, the SDK root is the directory containing `manifest.json`:
 ```text
 tabengine-sdk-<version>-windows-x64-<config>/
   README.md                     this guide
+  LICENSE / NOTICE              TabEngine's Apache-2.0 license
+  THIRD_PARTY_NOTICES.md        third-party component list
   manifest.json
   bin/skia.dll
   include/tabengine/*.h
@@ -26,7 +28,7 @@ tabengine-sdk-<version>-windows-x64-<config>/
   lib/cmake/TabEngine/...
   docs/API_REFERENCE.md
   examples/sdk_hello_tabs/      complete application source
-  licenses/                     third-party notices
+  licenses/                     Skia and component license texts
 ```
 
 Obtain the package and its expected ZIP SHA-256 from your distributor, then

@@ -3,14 +3,15 @@
 This guide covers building the Windows SDK, changing TabEngine, validating a
 packaged consumer, and integrating the SDK into an application. It describes
 the current local build; it is not a GitHub publication procedure. TabEngine
-has no public remote or project license yet.
+is licensed under Apache-2.0 and has no public remote yet.
 
 ## Scope and build inputs
 
 The supported SDK target is Windows x64 with Visual Studio 18 2026 and C++20.
 The SDK contains TabEngine static libraries, one pinned Skia DLL and import
 library, matching TabEngine and Skia headers, FreeType/libpng/zlib libraries,
-CMake package files, a manifest, and third-party notices. Debug and Release
+CMake package files, a manifest, TabEngine's `LICENSE`/`NOTICE`/
+`THIRD_PARTY_NOTICES.md`, and the third-party license bundle. Debug and Release
 are separate packages. A consumer must use the matching SDK configuration and
 an MSVC toolchain compatible with the package. There is no stable C++ binary
 ABI across arbitrary compiler or SDK updates; rebuild consumers after an SDK
@@ -134,7 +135,8 @@ prove the provenance of an arbitrary `--skia-root` path.
 ## Package and consumer contract
 
 Each ZIP contains one top-level directory with a relocatable SDK root. The
-root contains `manifest.json`, `bin/skia.dll`, `lib/`, `include/tabengine/`,
+root contains `manifest.json`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`,
+`bin/skia.dll`, `lib/`, `include/tabengine/`,
 `skia/`, `docs/`, `examples/sdk_hello_tabs/`, `licenses/`, and
 `lib/cmake/TabEngine/`. Extract the archive and point
 the consumer at that root, not at its parent directory or at the ZIP itself.
@@ -215,6 +217,6 @@ the same CMake package.
 | `verify` reports a file mismatch | Repackage from the intended inputs. Do not edit files inside a staged or extracted SDK. |
 
 Skia/MSBuild logs are in `build/logs/`. Errors from the installer and external
-consumer appear in the command output. If a package is to be distributed,
-settle TabEngine's project license and audit the bundled third-party notices
-before publication.
+consumer appear in the command output. TabEngine's license files ship inside
+every package. When changing Skia features or externals, re-audit the bundled
+third-party notices before publication.

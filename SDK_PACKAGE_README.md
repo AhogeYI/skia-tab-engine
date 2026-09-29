@@ -12,3 +12,8 @@ TabEngine or Skia source repositories.
 `manifest.json` identifies the package version, configuration, pinned Skia
 revision, and hashes of installed files. Debug and Release packages are
 separate. `bin/skia.dll` must be deployed beside your application executable.
+
+TabEngine is released under Apache-2.0: `LICENSE` and `NOTICE` sit at the SDK
+root, and `THIRD_PARTY_NOTICES.md` maps every redistributed third-party
+component (Skia, skcms, FreeType, libpng, zlib, D3D12 Memory Allocator,
+SPIRV-Cross) to its license text under `licenses/`.

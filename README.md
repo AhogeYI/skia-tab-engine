@@ -65,7 +65,10 @@ Each archive contains TabEngine static libraries, the pinned Skia DLL and import
 
 The `verify` action extracts the zip to a new directory, copies a small consumer outside the source tree, then builds and runs it using only `find_package(TabEngine CONFIG REQUIRED)`, `TabEngine::SDK`, and `TabEngine::FreeType`. It also builds and runs the complete example directly from the extracted SDK, without TabEngine source files. These checks exercise Skia drawing, TabEngine text drawing, FreeType initialization, Win32 platform/renderer factories, and application callbacks. The SDK's `manifest.json` records the Skia and external revisions, GN argument hash, build configuration, and every packaged file hash. Debug and Release SDKs are separate and must not be mixed. TabEngine still offers source compatibility rather than a stable cross-toolchain C++ ABI; rebuild consumers when updating the SDK.
 
-These are local release artifacts. A public release still requires choosing a license for TabEngine itself and validating distribution notices. File Manager now consumes this installed SDK through its CMake package.
+These are local release artifacts; the public distribution point (a Git remote
+and release channel) is still to be created. Every archive carries TabEngine's
+own `LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md` next to the bundled Skia
+license texts. File Manager now consumes this installed SDK through its CMake package.
 
 When working in the the development workspace workspace, select **TabEngine (vs-debug)** in VS Code's Run and Debug menu and press F5. Its pre-launch task configures and builds the demo in `tab-engine/build/vs-debug` using the workspace's Skia package.
 
@@ -97,4 +100,9 @@ Windows is the only backend implemented now. The intended future desktop scope i
 
 ## Repository status
 
-This local repository has no remote or public license yet. Those choices must be settled before distribution. Do not copy source from Chromium, Skia, or other projects into this repository without checking the file's license and required notices.
+TabEngine is licensed under [Apache-2.0](LICENSE); copyright is held by The
+TabEngine Authors. See [NOTICE](NOTICE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the third-party
+components redistributed with the SDK packages, and [CONTRIBUTING.md](CONTRIBUTING.md)
+for the contribution terms (DCO `Signed-off-by`, no CLA). The repository has
+no public remote yet; creating it is the maintainer's step. Do not copy source from Chromium, Skia, or other projects into this repository without checking the file's license and required notices.
