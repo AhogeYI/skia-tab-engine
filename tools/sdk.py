@@ -177,13 +177,20 @@ def build_skia(config: str) -> Path:
     if config == "Release":
         args = args.replace("is_official_build = false", "is_official_build = true", 1)
     args = (f'is_debug = {str(config == "Debug").lower()}\n'
+            # Keep Skia's clang-only trivial-abi annotations off so the packaged
+            # headers assume nothing about non-MSVC attribute support; consumers
+            # rebuild against the SDK anyway.
             'is_trivial_abi = false\n'
+            # Match the SDK consumer's CRT (/MDd Debug, /MD Release) so the DLL
+            # and the packaged import library bind to one runtime flavor.
             f'extra_cflags = ["{("/MDd" if config == "Debug" else "/MD")}"]\n'
             + args)
     (output / "args.gn").write_text(args, encoding="utf-8", newline="\n")
-    dotfile = SKIA / ".gn"
-    original = dotfile.read_bytes()
-    marker = 'script_executable = "python3"'
+        dotfile = SKIA / ".gn"
+        original = dotfile.read_bytes()
+        # GN's .gn names a "python3" executable for its scripts, which Windows
+        # does not provide; a shim directory on PATH points it at this Python.
+        marker = 'script_executable = "python3"'
     dotfile_text = original.decode("utf-8")
     with tempfile.TemporaryDirectory(prefix="tabengine-python3-") as temp:
         shim = Path(temp)

@@ -100,6 +100,9 @@ public:
 
 private:
     enum class DragPhase { Idle, Pressed, InStrip, NativeWindow };
+    // One pointer-driven tab gesture at a time. A tear-off reassigns `window`
+    // to the temporary window while `source_window` keeps the origin strip;
+    // `pending_target` holds a strip probed during the native move loop.
     struct Drag {
         DragPhase phase = DragPhase::Idle;
         WindowId window = 0;
@@ -200,6 +203,10 @@ private:
     // set_body_drag); strip-area moves forward to the body for these only.
     std::unordered_set<WindowId> body_drag_;
     std::vector<WindowId> pending_destroy_;
+    // Reentry guards: busy_windows_ rejects structural shell calls made from
+    // inside a mutation callback or paint for that window; dispatch_depth_
+    // tracks nested event dispatch so native teardown defers to the outermost
+    // dispatch (pending_destroy_ holds those windows meanwhile).
     std::unordered_set<WindowId> busy_windows_;
     std::unordered_map<WindowId, WindowVisual> visuals_;
     int dispatch_depth_ = 0;

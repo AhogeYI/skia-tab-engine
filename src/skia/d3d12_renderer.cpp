@@ -106,6 +106,8 @@ public:
         if (FAILED(factory->CreateSwapChainForHwnd(backend_.fQueue.get(), hwnd, &desc,
                                                    nullptr, nullptr, &swapchain1))) return false;
         (void)factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+        // Alt+Enter fullscreen is a window association the host never asked
+        // for; this chrome owns every frame and input path, so opt out.
         auto window = std::make_unique<WindowSurface>();
         if (FAILED(swapchain1->QueryInterface(IID_PPV_ARGS(&window->swapchain)))) return false;
         if (FAILED(backend_.fDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE,
@@ -129,6 +131,9 @@ public:
         HRESULT hr = window.swapchain->ResizeBuffers(kFrameCount,
                 static_cast<UINT>(size.width), static_cast<UINT>(size.height), kFormat, 0);
         if (FAILED(hr)) {
+            // A failed resize usually means outstanding references to the old
+            // buffers. Dropping Skia's GPU cache releases them; if the retry
+            // also fails, treat the device as lost and let the host fall back.
             context_->freeGpuResources();
             hr = window.swapchain->ResizeBuffers(kFrameCount,
                     static_cast<UINT>(size.width), static_cast<UINT>(size.height), kFormat, 0);
@@ -204,6 +209,9 @@ private:
     }
 
     bool release_frames(WindowSurface& window) {
+        // ResizeBuffers and swapchain teardown require every buffer reference
+        // gone: flush Skia's queue, wait for each frame's fence so the GPU is
+        // really done, then drop the surfaces before freeing cached resources.
         context_->flush();
         context_->submit(GrSyncCpu::kYes);
         window.acquired = false;
@@ -222,9 +230,14 @@ private:
     sk_sp<GrDirectContext> context_;
     std::unordered_map<WindowId, std::unique_ptr<WindowSurface>> windows_;
     std::uint64_t next_fence_ = 0;
+    // Sticky: once set, every entry point fails fast and WindowsRenderer
+    // reroutes the affected windows to the raster fallback permanently.
     bool device_lost_ = false;
 };
 
+// GPU-first wrapper: a window renders through D3D12 from attach until its
+// first device-side failure, then falls back to raster once and stays there
+// for its lifetime. Backend choice is per window and never auto-upgrades.
 class WindowsRenderer final : public IRenderer {
 public:
     WindowsRenderer() : gpu_(std::make_unique<D3D12Renderer>()),

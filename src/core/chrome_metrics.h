@@ -2,8 +2,9 @@
 
 namespace tabengine::detail {
 
-// Desktop tab-strip defaults aligned with desktop Chromium tab-strip metrics.
-// The leading slot is application-painted; its width is a default, not a brand.
+// Desktop tab-strip defaults aligned with desktop Chromium's tab-strip
+// metrics. The leading slot is application-painted; its width is a default,
+// not a brand.
 struct ChromeMetrics {
     static constexpr int strip_height = 41;
     static constexpr int strip_padding = 6;

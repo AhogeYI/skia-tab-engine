@@ -1267,6 +1267,9 @@ void Shell::finish_native_drag(MoveLoopResult result) {
     const Drag completed = drag_;
     const WindowId source = completed.window;
     const WindowId target = completed.cancel_requested ? 0 : completed.pending_target;
+    // An attach request over a probed strip takes precedence over the move
+    // loop's own result: handle_moving ends the loop precisely to attach, so
+    // a pending target is honored even when the loop reports Canceled.
     bool attached = false;
     if (target && model_.window(target) && model_.window(source)) {
         const auto target_layout = layout(target);
@@ -1275,6 +1278,10 @@ void Shell::finish_native_drag(MoveLoopResult result) {
         const std::size_t index = Layout::insertion_index(target_layout, x, target_layout.tabs.size());
         attached = transfer_tab(source, target, completed.tab, index);
     }
+    // Without an attach the torn tab returns to its source window's original
+    // slot on cancel, a programmatic end, or a failed attach. Only a cleanly
+    // completed move with no target leaves the tab in the torn window; a
+    // source window that vanished during the move keeps the tab where it is.
     if (!attached && source != completed.source_window &&
         (completed.cancel_requested || result != MoveLoopResult::Completed || target != 0) &&
         model_.window(source) && model_.window(completed.source_window)) {
