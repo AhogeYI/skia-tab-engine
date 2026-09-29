@@ -154,7 +154,13 @@ public:
     void extra_caption_button_pressed(WindowId window, int index) override {
         extra_caption_clicks.emplace_back(window, index);
     }
-    void paint_body(WindowId, TabId, SkCanvas&, Rect) override {}
+    void paint_body(WindowId window, TabId, SkCanvas&, Rect) override {
+        ++body_paints;
+        if (reenter_paint && shell) {
+            reenter_paint = false;
+            shell->on_event({EventType::Paint, window});
+        }
+    }
     void body_event(const Event&, Rect) override {}
 
     Shell* shell = nullptr;
@@ -162,6 +168,8 @@ public:
     TabId denied_tab = 0;
     WindowId denied_window = 0;
     bool reenter = false;
+    bool reenter_paint = false;
+    int body_paints = 0;
     TabId reentrant_tab = 999;
     std::vector<Binding> attached;
     std::vector<Binding> detached;
@@ -317,6 +325,12 @@ int main() {
         CHECK(client.body_bounds[source].width == 640);
         CHECK(client.body_bounds[source].height == 439);
         CHECK(renderer.presents > presents_before_resize);
+        client.reenter_paint = true;
+        const int body_paints_before_reentry = client.body_paints;
+        const int presents_before_reentry = renderer.presents;
+        shell.on_event({EventType::Paint, source});
+        CHECK(client.body_paints == body_paints_before_reentry + 1);
+        CHECK(renderer.presents == presents_before_reentry + 1);
         platform.dpi_scale = 1.5f;
         shell.on_event({EventType::DpiChanged, source});
         CHECK((client.dpi_events ==

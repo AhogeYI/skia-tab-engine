@@ -1319,6 +1319,15 @@ void Shell::paint(WindowId window) {
     if (!w) return;
     const Size size = platform_.client_size(window);
     if (size.width <= 0 || size.height <= 0) return;
+    // Resized paints synchronously, so a client paint callback may dispatch
+    // another Paint before the outer frame presents. Reject it before canvas()
+    // acquires a back buffer or mutates the renderer's current frame.
+    if (!busy_windows_.insert(window).second) return;
+    struct PaintGuard {
+        std::unordered_set<WindowId>& busy;
+        WindowId window;
+        ~PaintGuard() { busy.erase(window); }
+    } guard{busy_windows_, window};
     const Size rendered = renderer_.info(window).surface_size;
     if (rendered.width != size.width || rendered.height != size.height) {
         renderer_.resize(window, size);
@@ -1326,12 +1335,6 @@ void Shell::paint(WindowId window) {
     }
     SkCanvas* canvas = renderer_.canvas(window);
     if (!canvas) return;
-    struct PaintGuard {
-        std::unordered_set<WindowId>& busy;
-        WindowId window;
-        bool owns;
-        ~PaintGuard() { if (owns) busy.erase(window); }
-    } guard{busy_windows_, window, busy_windows_.insert(window).second};
     const float scale = platform_.scale(window);
     const StripLayout strip = layout(window);
     const bool dragging = drag_.phase == DragPhase::InStrip && drag_.window == window;
