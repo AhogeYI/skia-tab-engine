@@ -1,5 +1,9 @@
 #include "tabengine/shell.h"
 
+#include "include/core/SkCanvas.h"
+#include "include/core/SkImageInfo.h"
+#include "include/core/SkSurface.h"
+
 #include <algorithm>
 #include "check.h"
 #include <string_view>
@@ -70,12 +74,34 @@ public:
 
 class Renderer final : public IRenderer {
 public:
-    bool attach(WindowId, void*, Size) override { return true; }
-    void resize(WindowId, Size) override {}
+    bool attach(WindowId id, void*, Size size) override {
+        resize(id, size);
+        return true;
+    }
+    void resize(WindowId id, Size size) override { sizes[id] = size; }
     void detach(WindowId) override {}
-    SkCanvas* canvas(WindowId) override { return nullptr; }
-    void present(WindowId, void*) override {}
-    RenderInfo info(WindowId) const override { return {}; }
+    SkCanvas* canvas(WindowId id) override {
+        const auto it = sizes.find(id);
+        if (it == sizes.end() || it->second.width <= 0 || it->second.height <= 0) {
+            return nullptr;
+        }
+        auto& surface = surfaces[id];
+        if (!surface || surface->width() != it->second.width ||
+            surface->height() != it->second.height) {
+            surface = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(
+                it->second.width, it->second.height));
+        }
+        return surface ? surface->getCanvas() : nullptr;
+    }
+    void present(WindowId, void*) override { ++presents; }
+    RenderInfo info(WindowId id) const override {
+        const auto it = sizes.find(id);
+        return it == sizes.end() ? RenderInfo{} : RenderInfo{RenderBackend::Raster, it->second};
+    }
+
+    std::unordered_map<WindowId, Size> sizes;
+    std::unordered_map<WindowId, sk_sp<SkSurface>> surfaces;
+    int presents = 0;
 };
 
 struct Binding {
@@ -281,9 +307,16 @@ int main() {
 
         platform.windows[source].width = 640;
         platform.windows[source].height = 480;
+        // Resized paints synchronously: the modal SC_SIZE loop dispatches
+        // WM_SIZE but starves the frame timer, so an invalidate() here
+        // would let DWM compose one stretched stale frame (border-drag
+        // flash). The fake platform's invalidate/request_animation_frame
+        // do nothing, so a present here can only come from the dispatch.
+        const int presents_before_resize = renderer.presents;
         shell.on_event({EventType::Resized, source, {}, {}, {640, 480}});
         CHECK(client.body_bounds[source].width == 640);
         CHECK(client.body_bounds[source].height == 439);
+        CHECK(renderer.presents > presents_before_resize);
         platform.dpi_scale = 1.5f;
         shell.on_event({EventType::DpiChanged, source});
         CHECK((client.dpi_events ==

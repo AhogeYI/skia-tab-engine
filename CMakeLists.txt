@@ -148,6 +148,8 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         add_test(NAME tabengine_shell_test COMMAND tabengine_shell_test)
 
         add_executable(tabengine_shell_lifecycle_test tests/shell_lifecycle_test.cpp)
+        target_include_directories(tabengine_shell_lifecycle_test PRIVATE "${TABENGINE_SKIA_ROOT}")
+        target_compile_definitions(tabengine_shell_lifecycle_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_shell_lifecycle_test PRIVATE tabengine_skia)
         add_test(NAME tabengine_shell_lifecycle_test COMMAND tabengine_shell_lifecycle_test)
 

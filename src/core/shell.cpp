@@ -462,7 +462,13 @@ void Shell::handle_event(const Event& event) {
                 hover_card_bounds(event.window, visual->second.card.displayed));
         client_.body_geometry_changed(event.window, body_bounds(event.window),
                                       platform_.scale(event.window));
-        if (model_.window(event.window)) platform_.invalidate(event.window);
+        // Border drags run inside the modal SC_SIZE loop, which dispatches
+        // WM_SIZE but starves the frame timer: arming invalidate() here
+        // leaves DWM composing the resized window from the stale frame for
+        // a beat (visible as a stretched flash). Paint synchronously in the
+        // Resized dispatch instead - the old product's window.cpp did the
+        // same ("Paint now so DWM does not stretch the last frame").
+        if (model_.window(event.window)) paint(event.window);
         break;
     case EventType::DpiChanged:
         renderer_.resize(event.window, platform_.client_size(event.window));
