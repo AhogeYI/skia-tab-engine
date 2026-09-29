@@ -186,11 +186,11 @@ def build_skia(config: str) -> Path:
             f'extra_cflags = ["{("/MDd" if config == "Debug" else "/MD")}"]\n'
             + args)
     (output / "args.gn").write_text(args, encoding="utf-8", newline="\n")
-        dotfile = SKIA / ".gn"
-        original = dotfile.read_bytes()
-        # GN's .gn names a "python3" executable for its scripts, which Windows
-        # does not provide; a shim directory on PATH points it at this Python.
-        marker = 'script_executable = "python3"'
+    dotfile = SKIA / ".gn"
+    original = dotfile.read_bytes()
+    # GN's .gn names a "python3" executable for its scripts, which Windows
+    # does not provide; a shim directory on PATH points it at this Python.
+    marker = 'script_executable = "python3"'
     dotfile_text = original.decode("utf-8")
     with tempfile.TemporaryDirectory(prefix="tabengine-python3-") as temp:
         shim = Path(temp)
