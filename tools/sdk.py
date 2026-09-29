@@ -277,6 +277,11 @@ def package_sdk(config: str, skia_root: Path | None = None) -> Path:
     if not source_licenses.is_dir():
         raise SystemExit(f"Skia license bundle is missing: {source_licenses}")
     shutil.copytree(source_licenses, stage / "licenses", dirs_exist_ok=True)
+    for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"):
+        source = ROOT / name
+        if not source.is_file():
+            raise SystemExit(f"TabEngine license file is missing: {source}")
+        shutil.copy2(source, stage / name)
     for name in ("SKIA_BUILD_INFO.txt", "skia_args.gn"):
         shutil.copy2(skia_root / name, stage / name)
     version_match = re.search(r"project\(TabEngine VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
@@ -360,7 +365,8 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
         path = stage / relative
         if not path.is_file() or hash_file(path) != expected:
             raise SystemExit(f"SDK file mismatch: {relative}")
-    for relative in ("README.md", "docs/SDK_USER_GUIDE.md",
+    for relative in ("README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
+                     "docs/SDK_USER_GUIDE.md",
                      "docs/API_REFERENCE.md", "examples/sdk_hello_tabs/CMakeLists.txt",
                      "examples/sdk_hello_tabs/main.cpp"):
         if not (stage / relative).is_file():
