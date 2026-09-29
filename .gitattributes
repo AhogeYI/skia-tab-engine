@@ -1,0 +1,14 @@
+# Normalize all text files to LF in the repository; editors honor
+# .editorconfig for working-tree line endings.
+* text=auto
+
+# Windows-only build sources produced by MSVC tooling stay untouched.
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+
+# Binaries
+*.png binary
+*.zip binary
+*.lib binary
+*.dll binary
+*.pdb binary

@@ -11,7 +11,11 @@ target_include_directories(tabengine_core PUBLIC
     $<INSTALL_INTERFACE:include>)
 set_target_properties(tabengine_core PROPERTIES EXPORT_NAME Core)
 
-include(CTest)
+# Test tree is a top-level development concern: add_subdirectory consumers
+# get libraries only and opt in explicitly with -DBUILD_TESTING=ON.
+if(PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+endif()
 if(BUILD_TESTING)
     add_executable(tabengine_core_test tests/core_test.cpp)
     target_link_libraries(tabengine_core_test PRIVATE tabengine_core)
@@ -53,6 +57,10 @@ endif()
 
 if(TABENGINE_BUILD_SKIA AND NOT WIN32)
     message(FATAL_ERROR "The Skia shell currently has only a Windows backend")
+endif()
+
+if(NOT WIN32)
+    message(STATUS "TabEngine: core-only configuration (the Win32 host and Skia shell require Windows; see docs/PORTING.md)")
 endif()
 
 if(WIN32 AND TABENGINE_BUILD_SKIA)

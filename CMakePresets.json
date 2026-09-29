@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "core",
+      "displayName": "Core library and tests (any platform, no Skia)",
+      "binaryDir": "${sourceDir}/build/core",
+      "cacheVariables": { "BUILD_TESTING": "ON" }
+    },
+    {
+      "name": "windows-demo",
+      "displayName": "Windows workbench demo (set TABENGINE_SKIA_ROOT first)",
+      "binaryDir": "${sourceDir}/build/windows",
+      "cacheVariables": {
+        "TABENGINE_BUILD_WIN32_DEMO": "ON",
+        "TABENGINE_SKIA_ROOT": "$env{TABENGINE_SKIA_ROOT}"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "core", "configurePreset": "core", "configuration": "Debug" },
+    { "name": "windows-demo", "configurePreset": "windows-demo", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "core",
+      "configurePreset": "core",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-demo",
+      "configurePreset": "windows-demo",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

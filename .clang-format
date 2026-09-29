@@ -1,0 +1,11 @@
+# House style for TabEngine sources. The config mirrors the existing code
+# (4-space indent, ~100 columns); a repo-wide reformat is intentionally not
+# applied — format changed and new lines, and let opportunistic passes catch
+# the rest.
+BasedOnStyle: Google
+Standard: c++20
+IndentWidth: 4
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve
