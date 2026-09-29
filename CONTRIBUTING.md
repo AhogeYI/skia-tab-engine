@@ -7,9 +7,9 @@ change must respect.
 
 ## Project scope
 
-TabEngine is an embeddable C++20 tabbed desktop window framework, developed
-independently. It implements the tab strip, window chrome, drag
-and tear-off, and the host contracts. It does not implement an address bar,
+TabEngine is an embeddable C++20 tabbed desktop window framework. It
+implements the tab strip, window chrome, drag and tear-off, and the host
+contracts. It does not implement an address bar,
 navigation, file management, session files, menus, or a web engine: the
 application owns content and paints everything below the tab strip through
 `IClient`. Windows is the only backend today; the model, layout, and host
@@ -33,6 +33,13 @@ supported path), while the older workbench build accepts any
 `TABENGINE_SKIA_ROOT` package with `include/` and `lib/skia.lib`. See the
 [README](README.md) and the [SDK development guide](docs/SDK_DEVELOPMENT.md)
 for the full commands.
+
+The core library and its tests are platform-neutral: they build on any
+desktop OS with CMake 3.24+ and a C++20 compiler (`cmake --preset core`),
+and a CI gate runs them on Linux and Windows. Everything Windows-specific —
+the shell, renderer, demo, and SDK — additionally needs the Visual Studio
+C++ workload. The contracts and the path to additional platforms are
+described in the [porting guide](docs/PORTING.md).
 
 ## Build and test
 
@@ -73,6 +80,8 @@ configurations are affected).
   header.
 - Match the density and idiom of the surrounding code; comments state
   constraints the code cannot show.
+- `.clang-format` mirrors the existing style; run it over changed and new
+  lines (a repo-wide reformat is intentionally not applied).
 - Never copy source from Chromium, Skia, or any other project into this
   repository without checking the file's license and the notices it requires.
 

@@ -49,7 +49,7 @@ content, input routing, and styling.
 | Platform | Status |
 | --- | --- |
 | Windows 10/11, x64 (Win32 + D3D12) | Implemented, development preview |
-| Other desktop platforms | Planned; the model, layout, and host contracts carry no Win32 types |
+| Other desktop platforms | Planned; the model, layout, and host contracts carry no Win32 types — see the [porting guide](docs/PORTING.md) |
 
 ## Quick start from source
 
@@ -77,6 +77,10 @@ ctest --test-dir build/windows -C Debug --output-on-failure
 Run `build/windows/Debug/tabengine_win32_demo.exe` for the workbench (add
 `--raster` to force the CPU backend). For a library-only Windows build without
 the demo, set `TABENGINE_BUILD_SKIA=ON` and `TABENGINE_BUILD_WIN32_DEMO=OFF`.
+
+Both paths also exist as CMake presets: `cmake --preset core` works on any
+desktop OS with any generator, and the `windows-demo` preset reads the Skia
+package root from the `TABENGINE_SKIA_ROOT` environment variable.
 
 ## Using the SDK
 
@@ -187,7 +191,10 @@ What is verified: ten CTest suites cover the model, shell lifecycle, drag
 transfer and cancellation, IME and character input, text rendering, hidden
 window rendering, and D3D12 resize with backend retention; GPU and raster
 screenshot checks, a second window, and a scripted native tear-off have been
-confirmed on Windows. What is not yet validated: physical pointer feel,
+confirmed on Windows; and the platform-neutral core is built and tested on
+Linux and Windows by a CI gate (`.github/workflows/ci.yml`) that keeps
+OS-specific dependencies out of the contracts. What is not yet validated:
+physical pointer feel,
 attachment over an existing window, multi-monitor DPI switches, and IME
 candidate behavior on real hardware need hands-on testing, and other desktop
 platforms are unimplemented. Keyboard focus/accessibility, touch, pinned tabs,
