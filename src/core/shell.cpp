@@ -622,6 +622,21 @@ std::vector<Shell::ChromeTarget> Shell::chrome_targets(WindowId window) const {
     const Rect new_tab = visual_new_tab_bounds(window, strip);
     if (new_tab.width > 0 && new_tab.height > 0)
         targets.push_back({ChromeTarget::Kind::NewTab, 0, new_tab});
+    // Window-chrome surfaces: every caption button (product extras first,
+    // then the engine's min/max/close) and the draggable caption area
+    // between the new-tab button and the cluster. Exposure only - clicks
+    // keep routing through the platform's non-client handling.
+    for (int i = 0; i < strip.caption_button_count; ++i) {
+        const Rect button = caption_button(strip, i, scale);
+        if (button.width <= 0 || button.height <= 0) continue;
+        targets.push_back({ChromeTarget::Kind::CaptionButton, 0, button, i});
+    }
+    const int area_left = new_tab.width > 0 ? new_tab.right() : strip.caption_start;
+    if (strip.caption_start > area_left && strip.height > 0) {
+        targets.push_back({ChromeTarget::Kind::CaptionArea, 0,
+                           {area_left, 0, strip.caption_start - area_left,
+                            strip.height}});
+    }
     return targets;
 }
 

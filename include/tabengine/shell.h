@@ -63,9 +63,22 @@ public:
 class Shell {
 public:
     struct ChromeTarget {
-        enum class Kind { Tab, CloseTab, NewTab } kind = Kind::Tab;
+        enum class Kind {
+            Tab,
+            CloseTab,
+            NewTab,
+            // Window-chrome surfaces: the caption button cluster and the
+            // draggable caption area. Exposure only - clicks still route
+            // through the platform's non-client handling; automation uses
+            // the bounds to synthesize those clicks.
+            CaptionButton,
+            CaptionArea
+        } kind = Kind::Tab;
         TabId tab = 0;
         Rect bounds{}; // client pixels, including current animation position
+        // CaptionButton only: index in the strip's caption cluster
+        // (product extra buttons first, then min/max/close).
+        int button = -1;
     };
     Shell(IPlatform& platform, IRenderer& renderer, IClient& client);
     ~Shell();

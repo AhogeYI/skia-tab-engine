@@ -424,6 +424,65 @@ void check_close_visual() {
     CHECK(client.closed().size() == 1);
 }
 
+void check_chrome_target_caption_surfaces() {
+    // The caption cluster and the draggable caption area are part of the
+    // automation surface: three system buttons (no product extras here)
+    // at the strip's right edge, and a drag area between the new-tab
+    // button and the cluster.
+    FakePlatform platform;
+    auto renderer = tabengine::make_skia_raster_renderer();
+    Client client;
+    tabengine::Shell shell(platform, *renderer, client);
+    const auto window = shell.open_window({100, 100, 1280, 800});
+    (void)shell.new_tab(window);
+
+    std::vector<tabengine::Shell::ChromeTarget> buttons;
+    tabengine::Rect area{};
+    for (const auto& target : shell.chrome_targets(window)) {
+        if (target.kind == tabengine::Shell::ChromeTarget::Kind::CaptionButton) {
+            buttons.push_back(target);
+        } else if (target.kind == tabengine::Shell::ChromeTarget::Kind::CaptionArea) {
+            area = target.bounds;
+        }
+    }
+    CHECK(buttons.size() == 3);
+    for (std::size_t i = 0; i < buttons.size(); ++i) {
+        CHECK(buttons[i].button == static_cast<int>(i));
+        CHECK(buttons[i].bounds.y == 0);
+        CHECK(buttons[i].bounds.height > 0);
+        CHECK(buttons[i].bounds.width > 0);
+        if (i > 0) {
+            CHECK(buttons[i].bounds.x > buttons[i - 1].bounds.x);
+        }
+    }
+    // The cluster sits at the strip's right edge: the last button's right
+    // edge matches the strip width.
+    const tabengine::Size size = platform.client_size(window);
+    CHECK(buttons.back().bounds.right() == size.width);
+    // The drag area spans from the new-tab button to the cluster, full
+    // strip height, without overlapping either.
+    tabengine::Rect new_tab{};
+    for (const auto& target : shell.chrome_targets(window)) {
+        if (target.kind == tabengine::Shell::ChromeTarget::Kind::NewTab) {
+            new_tab = target.bounds;
+        }
+    }
+    CHECK(new_tab.width > 0);
+    CHECK(area.y == 0 && area.height > 0);
+    CHECK(area.x >= new_tab.right());
+    CHECK(area.right() <= buttons.front().bounds.x);
+    // Exposure is additive: tabs, close buttons and new-tab targets are
+    // still reported.
+    bool has_tab = false;
+    bool has_new_tab = false;
+    for (const auto& target : shell.chrome_targets(window)) {
+        has_tab = has_tab || target.kind == tabengine::Shell::ChromeTarget::Kind::Tab;
+        has_new_tab = has_new_tab ||
+                      target.kind == tabengine::Shell::ChromeTarget::Kind::NewTab;
+    }
+    CHECK(has_tab && has_new_tab);
+}
+
 } // namespace
 
 int main() {
@@ -514,5 +573,6 @@ int main() {
     check_shift_modified_chords_reach_the_client();
     check_body_release_and_capture_loss_reach_client();
     check_non_left_pointer_routing();
+    check_chrome_target_caption_surfaces();
     return 0;
 }
