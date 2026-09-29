@@ -36,7 +36,8 @@ for the full commands.
 
 The core library and its tests are platform-neutral: they build on any
 desktop OS with CMake 3.24+ and a C++20 compiler (`cmake --preset core`),
-and a CI gate runs them on Linux and Windows. Everything Windows-specific —
+and a CI gate runs them on Linux, macOS, and Windows in Debug and Release.
+Everything Windows-specific —
 the shell, renderer, demo, and SDK — additionally needs the Visual Studio
 C++ workload. The contracts and the path to additional platforms are
 described in the [porting guide](docs/PORTING.md).

@@ -192,7 +192,8 @@ transfer and cancellation, IME and character input, text rendering, hidden
 window rendering, and D3D12 resize with backend retention; GPU and raster
 screenshot checks, a second window, and a scripted native tear-off have been
 confirmed on Windows; and the platform-neutral core is built and tested on
-Linux and Windows by a CI gate (`.github/workflows/ci.yml`) that keeps
+Linux, macOS, and Windows in Debug and Release by a CI gate
+(`.github/workflows/ci.yml`) that keeps
 OS-specific dependencies out of the contracts. What is not yet validated:
 physical pointer feel,
 attachment over an existing window, multi-monitor DPI switches, and IME

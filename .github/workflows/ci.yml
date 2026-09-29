@@ -1,34 +1,60 @@
 name: ci
 
-# Core-only gate: builds and tests the platform-neutral layer on two desktop
-# OSes so a Windows-only dependency cannot leak into contracts, model, layout,
-# or theme unnoticed. The Windows Skia shell and SDK paths build on demand
-# locally (tools/sdk.py); a public runner image with the required Visual
-# Studio toolchain is a follow-up once the repository is published.
+# Chrome-style per-platform gate, distilled for a single library:
+# - Tier 1 (every push/PR): the platform-neutral core builds and tests on all
+#   three PC desktop platforms, in Debug and Release. A Windows-only
+#   dependency cannot leak into the contracts, model, layout, or theme
+#   unnoticed on any of them.
+# - Tier 2 (the Windows Skia shell and SDK): owned by tools/sdk.py end to
+#   end. The job is written but disabled until a hosted runner image is
+#   verified to carry the Visual Studio 18 2026 generator the SDK builder
+#   requires; enable it and validate once via workflow_dispatch before
+#   making it blocking.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   core:
-    name: core (${{ matrix.os }})
+    name: core (${{ matrix.os }}, ${{ matrix.build-type }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build-type: [Debug, Release]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
+      # -D overrides the preset's default; on the Windows multi-config
+      # generator CMAKE_BUILD_TYPE is ignored and --config/-C select instead.
       - name: Configure
-        run: cmake --preset core
+        run: cmake --preset core -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
 
       - name: Build
-        run: cmake --build --preset core
+        run: cmake --build --preset core --config ${{ matrix.build-type }}
 
       - name: Test
-        run: ctest --preset core
+        run: ctest --preset core -C ${{ matrix.build-type }}
+
+  # Tier 2 placeholder. Kept in-tree (disabled) so enabling the Windows
+  # binary path in CI is a one-line flip plus a verified toolchain check.
+  windows-sdk:
+    name: windows sdk (runner toolchain unverified)
+    if: false
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pinned Skia (shared DLL)
+        run: python tools/sdk.py build-skia --config Debug
+
+      - name: Package and verify the SDK
+        run: |
+          python tools/sdk.py package --config Debug
+          python tools/sdk.py verify --config Debug

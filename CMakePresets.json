@@ -6,7 +6,10 @@
       "name": "core",
       "displayName": "Core library and tests (any platform, no Skia)",
       "binaryDir": "${sourceDir}/build/core",
-      "cacheVariables": { "BUILD_TESTING": "ON" }
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "windows-demo",
