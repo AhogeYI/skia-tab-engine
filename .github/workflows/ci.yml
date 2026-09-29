@@ -1,0 +1,34 @@
+name: ci
+
+# Core-only gate: builds and tests the platform-neutral layer on two desktop
+# OSes so a Windows-only dependency cannot leak into contracts, model, layout,
+# or theme unnoticed. The Windows Skia shell and SDK paths build on demand
+# locally (tools/sdk.py); a public runner image with the required Visual
+# Studio toolchain is a follow-up once the repository is published.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset core
+
+      - name: Build
+        run: cmake --build --preset core
+
+      - name: Test
+        run: ctest --preset core
