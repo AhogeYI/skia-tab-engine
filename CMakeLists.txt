@@ -119,6 +119,19 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     target_link_libraries(tabengine_skia PUBLIC
         d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 uuid dwrite usp10 gdi32)
 
+    # Optional loopback HTTP transport: the only sockets in the engine.
+    # Windows-only for now; other platforms report the transport as absent.
+    add_library(tabengine_automation_transport STATIC
+        src/automation/transport_win32.cpp)
+    target_include_directories(tabengine_automation_transport PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_definitions(tabengine_automation_transport PRIVATE UNICODE _UNICODE)
+    target_link_libraries(tabengine_automation_transport
+        PUBLIC tabengine_automation PRIVATE ws2_32)
+    set_target_properties(tabengine_automation_transport PROPERTIES
+        EXPORT_NAME AutomationTransport)
+
     # Shell bridge: engine domains bound to one Shell (Window/Tab/Input/UI).
     # Windows-only because the logical-key table and input synthesis route
     # through the Win32 backend; links the Skia shell because Shell lives
@@ -242,6 +255,14 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
             PRIVATE tabengine_automation_shell)
         tabengine_deploy_skia_dll(tabengine_automation_bridge_test)
         add_test(NAME tabengine_automation_bridge_test COMMAND tabengine_automation_bridge_test)
+
+        add_executable(tabengine_automation_transport_test
+            tests/automation_transport_test.cpp)
+        target_compile_definitions(tabengine_automation_transport_test PRIVATE UNICODE _UNICODE)
+        target_link_libraries(tabengine_automation_transport_test
+            PRIVATE tabengine_automation_transport)
+        add_test(NAME tabengine_automation_transport_test
+            COMMAND tabengine_automation_transport_test)
     endif()
 endif()
 
