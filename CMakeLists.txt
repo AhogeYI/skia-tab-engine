@@ -11,6 +11,22 @@ target_include_directories(tabengine_core PUBLIC
     $<INSTALL_INTERFACE:include>)
 set_target_properties(tabengine_core PROPERTIES EXPORT_NAME Core)
 
+# Automation control runtime: platform-neutral protocol values, registry,
+# queueing and observation. Depends on core only; the pinned JSON parser is
+# a private implementation detail of this target.
+add_library(tabengine_automation STATIC
+    src/automation/json_value.cpp
+    src/automation/errors.cpp
+    src/automation/schema.cpp
+    src/automation/runtime.cpp)
+target_include_directories(tabengine_automation PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_include_directories(tabengine_automation SYSTEM PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/json")
+target_link_libraries(tabengine_automation PUBLIC tabengine_core)
+set_target_properties(tabengine_automation PROPERTIES EXPORT_NAME Automation)
+
 # Test tree is a top-level development concern: add_subdirectory consumers
 # get libraries only and opt in explicitly with -DBUILD_TESTING=ON.
 if(PROJECT_IS_TOP_LEVEL)
@@ -20,6 +36,11 @@ if(BUILD_TESTING)
     add_executable(tabengine_core_test tests/core_test.cpp)
     target_link_libraries(tabengine_core_test PRIVATE tabengine_core)
     add_test(NAME tabengine_core_test COMMAND tabengine_core_test)
+
+    add_executable(tabengine_automation_test tests/automation_values_test.cpp
+        tests/automation_runtime_test.cpp)
+    target_link_libraries(tabengine_automation_test PRIVATE tabengine_automation)
+    add_test(NAME tabengine_automation_test COMMAND tabengine_automation_test)
 endif()
 
 option(TABENGINE_BUILD_WIN32_DEMO "Build the Win32 Skia reference host" OFF)
