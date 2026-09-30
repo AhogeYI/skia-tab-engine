@@ -9,6 +9,12 @@
 namespace tabengine::automation {
 namespace {
 
+// TTL verdict for one entry at a given time. `now` <= 0 never expires
+// (value-only callers without a clock).
+inline bool artifact_expired(const ArtifactStore::Entry& entry, double now) {
+    return entry.ttl > 0.0 && now > 0.0 && now - entry.created > entry.ttl;
+}
+
 // Compact SHA-256 (FIPS 180-4): artifact integrity metadata only, not a
 // security boundary.
 struct Sha256 {
@@ -150,8 +156,7 @@ void ArtifactStore::expire(double now) {
 void ArtifactStore::expire_locked(double now) {
     for (auto it = order_.begin(); it != order_.end();) {
         const auto entry = entries_.find(*it);
-        if (entry != entries_.end() && entry->second.ttl > 0.0 &&
-            now - entry->second.created > entry->second.ttl) {
+        if (entry != entries_.end() && artifact_expired(entry->second, now)) {
             bytes_used_ -= entry->second.bytes.size();
             entries_.erase(entry);
             it = order_.erase(it);
@@ -199,17 +204,37 @@ std::string ArtifactStore::store(std::vector<std::uint8_t> bytes, std::string me
 }
 
 bool ArtifactStore::get(std::string_view id, Entry& out) const {
+    std::function<double()> clock;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        clock = read_clock_;
+    }
+    return get(id, out, clock ? clock() : 0.0);
+}
+
+bool ArtifactStore::get(std::string_view id, Entry& out, double now) const {
     std::lock_guard<std::mutex> guard(mutex_);
     const auto it = entries_.find(std::string(id));
     if (it == entries_.end()) return false;
+    if (artifact_expired(it->second, now)) return false;
     out = it->second;
     return true;
 }
 
 bool ArtifactStore::metadata(std::string_view id, JsonValue& out) const {
+    std::function<double()> clock;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        clock = read_clock_;
+    }
+    return metadata(id, out, clock ? clock() : 0.0);
+}
+
+bool ArtifactStore::metadata(std::string_view id, JsonValue& out, double now) const {
     std::lock_guard<std::mutex> guard(mutex_);
     const auto it = entries_.find(std::string(id));
     if (it == entries_.end()) return false;
+    if (artifact_expired(it->second, now)) return false;
     const Entry& entry = it->second;
     JsonValue value = JsonValue::object();
     value.set("artifactId", entry.id);
@@ -218,9 +243,15 @@ bool ArtifactStore::metadata(std::string_view id, JsonValue& out) const {
     value.set("sha256", entry.sha256);
     value.set("createdAt", entry.created);
     value.set("ttlS", entry.ttl);
+    value.set("expiresAt", entry.ttl > 0.0 ? entry.created + entry.ttl : 0.0);
     if (!entry.target.is_null()) value.set("target", entry.target);
     out = std::move(value);
     return true;
+}
+
+void ArtifactStore::set_read_clock(std::function<double()> clock) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    read_clock_ = std::move(clock);
 }
 
 } // namespace tabengine::automation

@@ -12,6 +12,11 @@
 // drain(), shutdown(), registration and provider calls are UI-thread. The
 // runtime never installs platform handlers itself - hosts compose wakes
 // through UiTaskPump and call drain() from their own loop.
+//
+// Connection lifecycle: connection_closed() cancels the connection's
+// requests (queued ones never execute) and queues the id for the next
+// drain(), where registered connection observers run on the UI thread.
+// Bridges use this to release session-held input (buttons, keys, IME).
 
 #include "tabengine/automation/activity.h"
 #include "tabengine/automation/artifacts.h"
@@ -28,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 // IPlatform is used by value in the pump's bind entry point.
@@ -89,6 +95,68 @@ struct RuntimeEnvironmentHooks {
     // window's current semantic tree.
     std::function<bool(WindowId, std::string_view)> node_exists;
 };
+
+// Cancellation handle for one submitted request (see
+// AutomationRuntime::receive_with_deadline). cancel() is idempotent and safe
+// from any thread. A request that is still queued is dropped and answered
+// Cancelled without executing; an executing one is marked so the next drain
+// settles it Cancelled unless its handler finished first (cooperative
+// cancellation - already-executed side effects are not rolled back).
+class RequestCancellation {
+public:
+    RequestCancellation() = default;
+    void cancel();
+    [[nodiscard]] bool cancelled() const;
+
+private:
+    friend class AutomationRuntime;
+    struct Control;
+    explicit RequestCancellation(std::shared_ptr<Control> control);
+    std::shared_ptr<Control> control_;
+};
+
+// RAII registration for connection observers. Destroying it detaches the
+// observer; observers themselves run on the UI thread during drain().
+class ConnectionObserverRegistration {
+public:
+    ConnectionObserverRegistration() = default;
+    ConnectionObserverRegistration(ConnectionObserverRegistration&& other) noexcept;
+    ConnectionObserverRegistration& operator=(ConnectionObserverRegistration&& other) noexcept;
+    ConnectionObserverRegistration(const ConnectionObserverRegistration&) = delete;
+    ConnectionObserverRegistration& operator=(const ConnectionObserverRegistration&) = delete;
+    ~ConnectionObserverRegistration();
+
+    [[nodiscard]] bool valid() const { return releaser_ != nullptr; }
+
+private:
+    friend class AutomationRuntime;
+    struct Releaser;
+    explicit ConnectionObserverRegistration(std::shared_ptr<Releaser> releaser);
+    std::shared_ptr<Releaser> releaser_;
+};
+
+// RAII registration for environment hooks. Destroying it revokes the hooks
+// it installed - unless a later installation replaced them - and fails the
+// wait conditions that depend on them with Unsupported. A destroyed bridge
+// must never leave hooks that capture its pointer behind.
+class EnvironmentHooksRegistration {
+public:
+    EnvironmentHooksRegistration() = default;
+    EnvironmentHooksRegistration(EnvironmentHooksRegistration&& other) noexcept;
+    EnvironmentHooksRegistration& operator=(EnvironmentHooksRegistration&& other) noexcept;
+    EnvironmentHooksRegistration(const EnvironmentHooksRegistration&) = delete;
+    EnvironmentHooksRegistration& operator=(const EnvironmentHooksRegistration&) = delete;
+    ~EnvironmentHooksRegistration();
+
+    [[nodiscard]] bool valid() const { return token_ != 0; }
+
+private:
+    friend class AutomationRuntime;
+    struct Releaser;
+    EnvironmentHooksRegistration(std::shared_ptr<Releaser> releaser, std::uint64_t token);
+    std::shared_ptr<Releaser> releaser_;
+    std::uint64_t token_ = 0;
+};;
 
 // Coalesced-wake dispatcher. The pump is the single owner of the platform's
 // wake handler; each consumer (the host's own background work, the
@@ -159,11 +227,31 @@ public:
     // bridge reads these to compose merged semantic snapshots.
     [[nodiscard]] const std::vector<ISemanticProvider*>& semantic_providers() const;
     [[nodiscard]] const std::vector<IActivityProvider*>& activity_providers() const;
+    // Providers with their registration slot: the slot is a stable identity
+    // assigned at registration and never reused, so a node ref minted for a
+    // slot can never silently address a later provider registered in the
+    // same list position. Semantic slots share the node-ref top byte space
+    // (9..255); registration fails once that space is exhausted.
+    struct SemanticProviderEntry {
+        std::uint64_t slot = 0;
+        ISemanticProvider* provider = nullptr;
+    };
+    struct ActivityProviderEntry {
+        std::uint64_t slot = 0;
+        IActivityProvider* provider = nullptr;
+    };
+    [[nodiscard]] std::vector<SemanticProviderEntry> semantic_provider_entries() const;
+    [[nodiscard]] std::vector<ActivityProviderEntry> activity_provider_entries() const;
     // Non-owning; may be null to restore the default allow policy.
     void set_policy(IAutomationPolicy* policy);
     // Engine-side wait predicates; may be reset with a default-constructed
-    // value. UI thread.
+    // value. UI thread. Installs without an owning registration (never
+    // revoked until replaced); prefer install_environment_hooks.
     void set_environment_hooks(RuntimeEnvironmentHooks hooks);
+    // Owned installation: destroying the returned registration revokes the
+    // hooks (when still current) and fails dependent waits with Unsupported.
+    [[nodiscard]] EnvironmentHooksRegistration install_environment_hooks(
+        RuntimeEnvironmentHooks hooks);
     // Capability block surfaced by System.getInfo/getCapabilities. Replaces
     // (not merges) on each call. UI thread.
     void set_instance_capabilities(JsonValue capabilities);
@@ -179,9 +267,24 @@ public:
     // a parseable request (result or error), or an error response with a
     // null id when the payload cannot be parsed at all.
     void receive(std::uint64_t connection, std::uint64_t transport_request, std::string payload);
-    // Drop one connection's session state: queued requests fail Cancelled,
-    // deferred completions settle Cancelled, wait conditions detach.
+    // Same contract, plus a caller-imposed cap on the execution deadline
+    // (relative seconds; <= 0 keeps the descriptor timeout) and a
+    // cancellation handle for the wait. Transports pass their response
+    // timeout so a request that outlives the client's wait is dropped
+    // instead of executing after the client saw a failure.
+    [[nodiscard]] std::shared_ptr<RequestCancellation> receive_with_deadline(
+        std::uint64_t connection, std::uint64_t transport_request, std::string payload,
+        double response_deadline_s);
+    // Drop one connection's session state: queued requests fail Cancelled
+    // without executing, deferred completions settle Cancelled, and the id
+    // is queued for the connection observers running on the next UI drain
+    // (bridges release session-held input there).
     void connection_closed(std::uint64_t connection);
+    // Register a UI-thread callback for connections closed through
+    // connection_closed(). The observer runs during drain(), after the
+    // connection's requests were cancelled.
+    [[nodiscard]] ConnectionObserverRegistration add_connection_observer(
+        std::function<void(std::uint64_t connection)> handler);
     // Immediate cross-thread wake when worker-side work needs a drain.
     void set_wake(std::function<void()> wake);
     // Bounded-delay wake used for wait polling and deadlines. The host
@@ -237,6 +340,10 @@ private:
     std::shared_ptr<Impl> impl_;
     std::shared_ptr<ArtifactStore> artifacts_;
     std::atomic<bool> stopped_{false};
+    // Scratch buffers for the compatibility provider views above (rebuilt
+    // on each call; UI thread only).
+    mutable std::vector<ISemanticProvider*> semantic_view_;
+    mutable std::vector<IActivityProvider*> activity_view_;
 
     [[nodiscard]] MethodRegistration wrap_token(std::uint64_t token);
     [[nodiscard]] static MethodDescriptor make_descriptor(

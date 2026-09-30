@@ -848,6 +848,319 @@ void test_overload_answers_instead_of_terminating() {
           limited_responses.has(703));
 }
 
+// Cancellation handle: a request cancelled while queued never executes and
+// answers Cancelled (regression: transports used to drop the response slot
+// and let the mutation run later).
+void test_cancel_handle_drops_queued_request() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses responses;
+    responses.install(runtime);
+
+    int mutations = 0;
+    std::vector<MethodDescriptor> methods;
+    methods.push_back(simple_method("app.review.mutate", "counts executions"));
+    MethodRegistration registration = runtime.register_methods(
+        "app.review", std::move(methods),
+        [&](const RequestContext&, automation::CompletionSink sink) {
+            ++mutations;
+            sink(MethodOutcome::success(JsonValue::object()));
+        });
+    CHECK(registration.valid());
+
+    // Keep the executor busy with a never-settling request.
+    automation::CompletionSink holder;
+    std::vector<MethodDescriptor> hold_methods;
+    hold_methods.push_back(simple_method("app.review.hold", "defers forever"));
+    MethodRegistration hold = runtime.register_methods(
+        "app.review", std::move(hold_methods),
+        [&](const RequestContext&, automation::CompletionSink sink) { holder = std::move(sink); });
+    CHECK(hold.valid());
+    runtime.receive(7, 1, R"({"jsonrpc":"2.0","id":"h","method":"app.review.hold"})");
+    runtime.drain(clock.now_value);
+
+    // The mutating request lands behind it in the queue; cancel before any
+    // drain can start it.
+    auto cancellation = runtime.receive_with_deadline(
+        7, 2, R"({"jsonrpc":"2.0","id":"m","method":"app.review.mutate"})", 5.0);
+    CHECK(cancellation != nullptr);
+    CHECK(!cancellation->cancelled());
+    cancellation->cancel();
+    CHECK(cancellation->cancelled());
+    CHECK(mutations == 0);   // never even dequeued
+
+    runtime.drain(clock.now_value);
+    CHECK(mutations == 0);
+    CHECK(responses.has(2));
+    CHECK(responses.error_code(2) == 1007);   // Cancelled, not executed
+
+    // Idempotent: a second cancel is a no-op.
+    cancellation->cancel();
+    CHECK(mutations == 0);
+}
+
+// The transport deadline cap: even with a generous descriptor timeout, a
+// caller-imposed cap makes an un-executed queued request expire on time.
+void test_receive_deadline_cap_expires_queued_request() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses responses;
+    responses.install(runtime);
+
+    int mutations = 0;
+    std::vector<MethodDescriptor> methods;
+    methods.push_back(simple_method("app.review.mutate", "counts executions"));
+    MethodRegistration registration = runtime.register_methods(
+        "app.review", std::move(methods),
+        [&](const RequestContext&, automation::CompletionSink sink) {
+            ++mutations;
+            sink(MethodOutcome::success(JsonValue::object()));
+        });
+    CHECK(registration.valid());
+
+    // No drain while queued; the cap is 0.5s, the descriptor timeout 10s.
+    runtime.receive_with_deadline(7, 3,
+                                  R"({"jsonrpc":"2.0","id":"m","method":"app.review.mutate"})",
+                                  0.5);
+    clock.now_value += 1.0;
+    runtime.drain(clock.now_value);
+    CHECK(mutations == 0);
+    CHECK(responses.has(3));
+    CHECK(responses.error_code(3) == 1006);   // DeadlineExceeded, never ran
+}
+
+// Connection observers: connection_closed defers notification to the UI
+// drain, exactly once, and detaching stops delivery.
+void test_connection_observer_runs_on_drain() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+
+    std::vector<std::uint64_t> released;
+    auto registration = runtime.add_connection_observer(
+        [&](std::uint64_t connection) { released.push_back(connection); });
+    CHECK(registration.valid());
+
+    runtime.connection_closed(42);
+    CHECK(released.empty());   // not yet: observers are UI-thread only
+    runtime.drain(clock.now_value);
+    CHECK(released.size() == 1);
+    CHECK(released[0] == 42);
+
+    runtime.connection_closed(43);
+    registration = {};   // detach
+    runtime.drain(clock.now_value);
+    CHECK(released.size() == 1);   // detached: no further delivery
+}
+
+// Operation.wait must report the operation's terminal state uniformly,
+// whether the wait started before or after the failure (regression: the
+// pending path used to answer satisfied:true and hide the error).
+void test_operation_wait_reports_terminal_state_uniformly() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses responses;
+    responses.install(runtime);
+
+    std::uint64_t operation = 0;
+    std::vector<MethodDescriptor> methods;
+    methods.push_back(simple_method("app.job.start", "starts an operation"));
+    MethodRegistration registration = runtime.register_methods(
+        "app.job", std::move(methods),
+        [&](const RequestContext& context, automation::CompletionSink sink) {
+            operation = runtime.start_operation("app.job.start", context);
+            JsonValue result = JsonValue::object();
+            result.set("operationId", automation::id_to_wire(operation));
+            sink(MethodOutcome::success(std::move(result)));
+        });
+    CHECK(registration.valid());
+
+    receive(runtime, 10, R"({"jsonrpc":"2.0","id":1,"method":"app.job.start"})");
+    runtime.drain(clock.now_value);
+    CHECK(operation != 0);
+
+    // Pending wait, then the operation fails.
+    receive(runtime, 11,
+            (R"({"jsonrpc":"2.0","id":2,"method":"Operation.wait","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})")
+                .c_str());
+    runtime.drain(clock.now_value);
+    CHECK(!responses.has(11));
+    runtime.finish_operation(operation, automation::OperationState::Failed, {},
+                             automation::Error::make(automation::ErrorCode::InvalidArgument,
+                                                     "disk on fire"));
+    clock.now_value += 0.05;
+    runtime.drain(clock.now_value);
+    CHECK(responses.has(11));
+    {
+        const JsonValue wait = responses.parsed(11);
+        const JsonValue* error = wait.find("error");
+        CHECK(error == nullptr);   // the WAIT succeeded; the failure is payload
+        const JsonValue& result = *wait.find("result");
+        CHECK(result.find("state")->as_string() == "failed");
+        CHECK(result.find("error")->find("code")->as_integer() == 1016);
+        CHECK(result.find("error")->find("message")->as_string() == "disk on fire");
+    }
+
+    // A wait issued AFTER the failure reports the identical shape.
+    receive(runtime, 12,
+            (R"({"jsonrpc":"2.0","id":3,"method":"Operation.wait","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})")
+                .c_str());
+    runtime.drain(clock.now_value);
+    CHECK(responses.has(12));
+    {
+        const JsonValue wait = responses.parsed(12);
+        CHECK(wait.find("error") == nullptr);
+        const JsonValue& result = *wait.find("result");
+        CHECK(result.find("state")->as_string() == "failed");
+        CHECK(result.find("error")->find("code")->as_integer() == 1016);
+        CHECK(result.find("waitedS")->is_number());
+    }
+}
+
+// Losing the activity provider that observed a scope must fail the wait
+// with ProviderUnavailable, never read as "quiet" (regression).
+void test_activity_provider_loss_fails_wait() {
+    struct Provider : automation::IActivityProvider {
+        std::atomic<int> pending{1};
+        std::atomic<bool> knows_scope{true};
+        bool activity(std::string_view scope, automation::ActivityReport& out) override {
+            if (scope != "listing" || !knows_scope.load()) return false;
+            out.generation = 1;
+            out.pending = static_cast<std::size_t>(pending.load());
+            return true;
+        }
+    };
+
+    {
+        // Provider unregisters while the wait is pending.
+        Clock clock;
+        AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+        Responses responses;
+        responses.install(runtime);
+        Provider provider;
+        auto registration = runtime.register_activity_provider(&provider);
+        CHECK(registration.valid());
+
+        receive(runtime, 20,
+                R"({"jsonrpc":"2.0","id":1,"method":"Wait.condition","params":{"condition":"activityQuiet","scope":"listing"}})");
+        runtime.drain(clock.now_value);
+        CHECK(!responses.has(20));   // pending (1 task)
+
+        registration = {};   // unregister
+        clock.now_value += 0.05;
+        runtime.drain(clock.now_value);
+        CHECK(responses.has(20));
+        CHECK(responses.error_code(20) == 1008);   // ProviderUnavailable
+    }
+
+    {
+        // Provider stays registered but stops knowing the scope.
+        Clock clock;
+        AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+        Responses responses;
+        responses.install(runtime);
+        Provider provider;
+        auto registration = runtime.register_activity_provider(&provider);
+        CHECK(registration.valid());
+
+        receive(runtime, 21,
+                R"({"jsonrpc":"2.0","id":1,"method":"Wait.condition","params":{"condition":"activityQuiet","scope":"listing"}})");
+        runtime.drain(clock.now_value);
+        CHECK(!responses.has(21));
+        provider.knows_scope.store(false);
+        clock.now_value += 0.05;
+        runtime.drain(clock.now_value);
+        CHECK(responses.has(21));
+        CHECK(responses.error_code(21) == 1008);
+    }
+
+    {
+        // A replacement provider registering later is included in the
+        // totals but never fakes quiet for work still pending elsewhere.
+        Clock clock;
+        AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+        Responses responses;
+        responses.install(runtime);
+        Provider slow;
+        slow.pending.store(2);
+        auto slow_registration = runtime.register_activity_provider(&slow);
+        receive(runtime, 22,
+                R"({"jsonrpc":"2.0","id":1,"method":"Wait.condition","params":{"condition":"activityQuiet","scope":"listing"}})");
+        runtime.drain(clock.now_value);
+        CHECK(!responses.has(22));
+        Provider idle;
+        idle.pending.store(0);
+        auto idle_registration = runtime.register_activity_provider(&idle);
+        clock.now_value += 0.05;
+        runtime.drain(clock.now_value);
+        CHECK(!responses.has(22));   // still 2 pending from the original
+        slow.pending.store(0);
+        clock.now_value += 0.05;
+        runtime.drain(clock.now_value);
+        CHECK(responses.has(22));
+        CHECK(responses.has_result(22));
+    }
+}
+
+// Environment hook registration: destroying it revokes the hooks, fails
+// dependent waits with Unsupported, and never clobbers a newer installation.
+void test_environment_hooks_registration_revocation() {
+    {
+        Clock clock;
+        AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+        Responses responses;
+        responses.install(runtime);
+
+        auto hooks = automation::RuntimeEnvironmentHooks{};
+        hooks.node_exists = [](tabengine::WindowId, std::string_view) { return false; };
+        auto registration = runtime.install_environment_hooks(std::move(hooks));
+        CHECK(registration.valid());
+
+        receive(runtime, 30,
+                R"({"jsonrpc":"2.0","id":1,"method":"Wait.condition","params":{"condition":"nodeAppears","windowId":"1","stableKey":"gone"}})");
+        runtime.drain(clock.now_value);
+        CHECK(!responses.has(30));   // pending
+
+        registration = {};   // revoke: like a bridge dying
+        clock.now_value += 0.05;
+        runtime.drain(clock.now_value);
+        CHECK(responses.has(30));
+        CHECK(responses.error_code(30) == 1000);   // Unsupported, not UAF
+
+        // New waits fail fast with no hooks installed.
+        receive(runtime, 31,
+                R"({"jsonrpc":"2.0","id":2,"method":"Wait.condition","params":{"condition":"nodeAppears","windowId":"1","stableKey":"gone"}})");
+        runtime.drain(clock.now_value);
+        CHECK(responses.error_code(31) == 1000);
+    }
+    {
+        // Token discipline: an older registration's destruction must not
+        // revoke hooks installed by a later one.
+        Clock clock;
+        AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+        Responses responses;
+        responses.install(runtime);
+
+        auto first_hooks = automation::RuntimeEnvironmentHooks{};
+        first_hooks.node_exists = [](tabengine::WindowId, std::string_view) { return false; };
+        auto first = runtime.install_environment_hooks(std::move(first_hooks));
+
+        auto second_hooks = automation::RuntimeEnvironmentHooks{};
+        second_hooks.node_exists = [](tabengine::WindowId, std::string_view key) { return key == "here"; };
+        auto second = runtime.install_environment_hooks(std::move(second_hooks));
+
+        first = {};   // superseded: revokes nothing
+        receive(runtime, 32,
+                R"({"jsonrpc":"2.0","id":1,"method":"Wait.condition","params":{"condition":"nodeAppears","windowId":"1","stableKey":"here"}})");
+        runtime.drain(clock.now_value);
+        clock.now_value += 0.05;   // past the wait's poll interval
+        runtime.drain(clock.now_value);
+        CHECK(responses.has(32));
+        CHECK(responses.has_result(32));   // second installation still works
+    }
+}
+
 int main() {
     run_automation_values_tests();
     test_app_method_round_trip();
@@ -868,5 +1181,11 @@ int main() {
     test_event_gap_when_ring_fully_trimmed();
     test_concurrent_settle_against_draining_waits();
     test_overload_answers_instead_of_terminating();
+    test_cancel_handle_drops_queued_request();
+    test_receive_deadline_cap_expires_queued_request();
+    test_connection_observer_runs_on_drain();
+    test_operation_wait_reports_terminal_state_uniformly();
+    test_activity_provider_loss_fails_wait();
+    test_environment_hooks_registration_revocation();
     return 0;
 }

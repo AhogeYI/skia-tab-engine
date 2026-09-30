@@ -51,7 +51,8 @@ struct SemanticNode {
     WindowId window = 0;
     ContentId content = 0;
     Rect bounds{};                 // client pixels at snapshot time
-    Rect clip{};                   // visible portion; empty rect = fully clipped
+    Rect clip{};                   // visible portion the provider computed;
+                                   // empty rect = fully clipped
     bool visible = true;
     bool enabled = true;
     bool focused = false;

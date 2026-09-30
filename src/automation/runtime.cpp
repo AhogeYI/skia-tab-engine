@@ -300,7 +300,20 @@ struct ConditionRecord {
     std::string stable_key;
     std::uint64_t operation = 0;
     std::uint64_t frame_target = 0;
-    std::function<bool(std::string& describe)> check;
+    // Providers whose presence the condition depends on (activityQuiet):
+    // losing one fails the wait instead of reading as "no pending work".
+    std::vector<std::uint64_t> activity_slots;
+    // Tri-state evaluation: Pending (keep waiting), Satisfied, or Failed
+    // (settle the request with the protocol error).
+    struct Eval {
+        enum class State { Pending, Satisfied, Failed };
+        State state = State::Pending;
+        Error error;
+    };
+    std::function<Eval(std::string& describe)> check;
+    // Optional result decorator applied when the condition is satisfied
+    // (Operation.wait folds the terminal state into its response).
+    std::function<void(JsonValue&)> decorate;
 };
 
 struct DomainEntry {
@@ -344,6 +357,9 @@ struct AutomationRuntime::Impl {
     // condition records. Kept under state_mutex so settle() needs no
     // second lock and no lock-order rules exist between the two.
     std::vector<std::uint64_t> retired_slots;
+    // Connections dropped through connection_closed(); the next UI drain
+    // hands them to the registered connection observers (input release).
+    std::vector<std::uint64_t> closed_connections;
 
     // ---- guarded by registry_mutex ----
     mutable std::mutex registry_mutex;
@@ -352,11 +368,29 @@ struct AutomationRuntime::Impl {
     std::uint64_t next_domain_token = 1;
 
     // ---- UI thread only ----
-    std::vector<ISemanticProvider*> semantic_providers_;
-    std::vector<IActivityProvider*> activity_providers_;
+    // Providers carry a stable registration slot (never reused) so node
+    // refs and wait bindings cannot silently address a successor.
+    struct SemanticSlotEntry {
+        std::uint64_t slot = 0;
+        ISemanticProvider* provider = nullptr;
+    };
+    struct ActivitySlotEntry {
+        std::uint64_t slot = 0;
+        IActivityProvider* provider = nullptr;
+    };
+    std::vector<SemanticSlotEntry> semantic_slots_;
+    std::vector<ActivitySlotEntry> activity_slots_;
+    // Semantic slots share the node-ref top byte (engine kinds 1..8, so
+    // provider slots start at 9 and must stay <= 255).
+    std::uint64_t next_semantic_slot_ = 9;
+    std::uint64_t next_activity_slot_ = 1;
     IDiagnosticProvider* diagnostics_provider = nullptr;
     IAutomationPolicy* policy = nullptr;
     RuntimeEnvironmentHooks env;
+    std::uint64_t env_owner_token = 0;
+    std::uint64_t next_env_token = 1;
+    std::vector<std::pair<std::uint64_t, std::function<void(std::uint64_t)>>> connection_observers;
+    std::uint64_t next_observer_token = 1;
 
     std::mutex event_mutex;
     std::deque<AutomationEvent> events;
@@ -444,6 +478,51 @@ struct AutomationRuntime::Impl {
         std::erase_if(conditions, [&retired](const ConditionRecord& record) {
             return std::find(retired.begin(), retired.end(), record.slot) != retired.end();
         });
+    }
+
+    // UI thread: deliver connection-close notifications queued by workers.
+    void notify_closed_connections() {
+        std::vector<std::uint64_t> closed;
+        {
+            std::lock_guard<std::mutex> guard(state_mutex);
+            if (closed_connections.empty()) return;
+            closed = std::move(closed_connections);
+            closed_connections.clear();
+        }
+        std::vector<std::function<void(std::uint64_t)>> observers;
+        observers.reserve(connection_observers.size());
+        for (const auto& [token, handler] : connection_observers) {
+            (void)token;
+            observers.push_back(handler);
+        }
+        for (const std::uint64_t connection : closed) {
+            for (auto& handler : observers) handler(connection);
+        }
+    }
+
+    // UI thread: revoke environment hooks owned by `token` and fail the
+    // wait conditions that depend on them. A registration whose token was
+    // superseded by a later installation revokes nothing.
+    void revoke_environment_hooks(std::uint64_t token) {
+        if (token == 0 || env_owner_token != token) return;
+        env = RuntimeEnvironmentHooks{};
+        env_owner_token = 0;
+        std::vector<std::uint64_t> failed_slots;
+        for (ConditionRecord& record : conditions) {
+            const bool depends_on_env = record.type == "nodeAppears" ||
+                                        record.type == "animationSettled" ||
+                                        record.type == "frameStable";
+            if (depends_on_env) failed_slots.push_back(record.slot);
+        }
+        if (failed_slots.empty()) return;
+        std::erase_if(conditions, [&failed_slots](const ConditionRecord& record) {
+            return std::find(failed_slots.begin(), failed_slots.end(), record.slot) !=
+                   failed_slots.end();
+        });
+        for (const std::uint64_t slot : failed_slots) {
+            settle(slot, MethodOutcome::failure(Error::unsupported(
+                             "the environment hooks providing this condition were revoked")));
+        }
     }
 
     void settle_deadline_or_cancel(std::uint64_t slot) {
@@ -606,8 +685,8 @@ struct AutomationRuntime::Impl {
 
         {
             JsonValue scopes = JsonValue::array();
-            for (IActivityProvider* candidate : activity_providers_) {
-                for (std::string& scope : candidate->scopes()) scopes.push_back(scope);
+            for (const ActivitySlotEntry& entry : activity_slots_) {
+                for (std::string& scope : entry.provider->scopes()) scopes.push_back(scope);
             }
             document.set("activityScopes", std::move(scopes));
         }
@@ -648,7 +727,11 @@ struct AutomationRuntime::Impl {
             }
             if (now_value < record.next_poll) continue;
             std::string describe;
-            if (record.check(describe)) {
+            const ConditionRecord::Eval eval = record.check(describe);
+            if (eval.state == ConditionRecord::Eval::State::Failed) {
+                settled.emplace_back(record.slot, MethodOutcome::failure(eval.error));
+                finished.push_back(record.slot);
+            } else if (eval.state == ConditionRecord::Eval::State::Satisfied) {
                 if (record.dwell > 0.0) {
                     if (record.satisfied_since < 0.0) record.satisfied_since = now_value;
                     if (now_value - record.satisfied_since < record.dwell) {
@@ -661,6 +744,7 @@ struct AutomationRuntime::Impl {
                 result.set("describe", describe);
                 result.set("satisfied", true);
                 result.set("waitedS", now_value - record.submitted);
+                if (record.decorate) record.decorate(result);
                 settled.emplace_back(record.slot, MethodOutcome::success(std::move(result)));
                 finished.push_back(record.slot);
             } else {
@@ -734,18 +818,34 @@ struct MethodRegistration::Releaser {
 
 struct ProviderRegistration::Releaser {
     std::weak_ptr<AutomationRuntime::Impl> owner;
-    std::uint64_t token = 0;
     std::uint64_t slot_id = 0;   // 0 semantic, 1 activity, 2 diagnostics
     void* provider = nullptr;
     ~Releaser() {
         const std::shared_ptr<AutomationRuntime::Impl> impl = owner.lock();
         if (!impl) return;
+        std::function<void()> wake;
         switch (slot_id) {
         case 0:
-            std::erase(impl->semantic_providers_, provider);
+            std::erase_if(impl->semantic_slots_,
+                          [provider = provider](
+                              const AutomationRuntime::Impl::SemanticSlotEntry& entry) {
+                              return entry.provider == provider;
+                          });
             break;
         case 1:
-            std::erase(impl->activity_providers_, provider);
+            // Wait conditions bound to this provider must not read its
+            // disappearance as "no pending work": the next drain fails
+            // them with ProviderUnavailable. Wake so that drain happens
+            // even without other traffic.
+            std::erase_if(impl->activity_slots_,
+                          [provider = provider](
+                              const AutomationRuntime::Impl::ActivitySlotEntry& entry) {
+                              return entry.provider == provider;
+                          });
+            {
+                std::lock_guard<std::mutex> guard(impl->state_mutex);
+                wake = impl->wake_callback;
+            }
             break;
         default:
             if (impl->diagnostics_provider == provider) {
@@ -753,6 +853,28 @@ struct ProviderRegistration::Releaser {
             }
             break;
         }
+        if (wake) wake();
+    }
+};
+
+struct ConnectionObserverRegistration::Releaser {
+    std::weak_ptr<AutomationRuntime::Impl> owner;
+    std::uint64_t token = 0;
+    ~Releaser() {
+        const std::shared_ptr<AutomationRuntime::Impl> impl = owner.lock();
+        if (!impl) return;
+        std::erase_if(impl->connection_observers,
+                      [token = token](const auto& entry) { return entry.first == token; });
+    }
+};
+
+struct EnvironmentHooksRegistration::Releaser {
+    std::weak_ptr<AutomationRuntime::Impl> owner;
+    std::uint64_t token = 0;
+    ~Releaser() {
+        const std::shared_ptr<AutomationRuntime::Impl> impl = owner.lock();
+        if (!impl) return;
+        impl->revoke_environment_hooks(token);
     }
 };
 
@@ -797,6 +919,89 @@ ProviderRegistration& ProviderRegistration::operator=(ProviderRegistration&& oth
 }
 
 ProviderRegistration::~ProviderRegistration() = default;
+
+ConnectionObserverRegistration::ConnectionObserverRegistration(
+    std::shared_ptr<Releaser> releaser)
+    : releaser_(std::move(releaser)) {}
+
+ConnectionObserverRegistration::ConnectionObserverRegistration(
+    ConnectionObserverRegistration&& other) noexcept = default;
+
+ConnectionObserverRegistration& ConnectionObserverRegistration::operator=(
+    ConnectionObserverRegistration&& other) noexcept {
+    if (this != &other) {
+        releaser_ = std::move(other.releaser_);
+    }
+    return *this;
+}
+
+ConnectionObserverRegistration::~ConnectionObserverRegistration() = default;
+
+EnvironmentHooksRegistration::EnvironmentHooksRegistration(std::shared_ptr<Releaser> releaser,
+                                                           std::uint64_t token)
+    : releaser_(std::move(releaser)), token_(token) {}
+
+EnvironmentHooksRegistration::EnvironmentHooksRegistration(
+    EnvironmentHooksRegistration&& other) noexcept = default;
+
+EnvironmentHooksRegistration& EnvironmentHooksRegistration::operator=(
+    EnvironmentHooksRegistration&& other) noexcept {
+    if (this != &other) {
+        releaser_ = std::move(other.releaser_);
+        token_ = std::exchange(other.token_, 0);
+    }
+    return *this;
+}
+
+EnvironmentHooksRegistration::~EnvironmentHooksRegistration() = default;
+
+// ---- request cancellation ----
+
+struct RequestCancellation::Control {
+    std::weak_ptr<AutomationRuntime::Impl> owner;
+    std::uint64_t slot = 0;
+    std::shared_ptr<std::atomic<bool>> flag;
+};
+
+RequestCancellation::RequestCancellation(std::shared_ptr<Control> control)
+    : control_(std::move(control)) {}
+
+bool RequestCancellation::cancelled() const {
+    return control_ && control_->flag && control_->flag->load();
+}
+
+void RequestCancellation::cancel() {
+    if (!control_ || !control_->flag || control_->flag->exchange(true)) return;
+    const std::shared_ptr<AutomationRuntime::Impl> impl = control_->owner.lock();
+    if (!impl) return;
+    // Drop the request while it is still queued; an executing one is
+    // settled by the next drain sweep via the cancel flag. The sweep and
+    // the drain's dequeue both hold state_mutex, so exactly one side wins.
+    std::vector<PendingRequest> dropped;
+    {
+        std::lock_guard<std::mutex> guard(impl->state_mutex);
+        for (auto it = impl->queue.begin(); it != impl->queue.end();) {
+            if (it->slot == control_->slot) {
+                dropped.push_back(std::move(*it));
+                it = impl->queue.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (PendingRequest& entry : dropped) {
+        impl->respond_now(entry.connection, entry.transport_request, entry.id_echo,
+                          entry.has_id,
+                          MethodOutcome::failure(Error::make(
+                              ErrorCode::Cancelled, "request was cancelled before execution")));
+    }
+    std::function<void()> wake;
+    {
+        std::lock_guard<std::mutex> guard(impl->state_mutex);
+        wake = impl->wake_callback;
+    }
+    if (wake) wake();
+};
 
 void UiTaskPump::bind_platform(IPlatform& platform) {
     if (!impl_) impl_ = std::make_shared<Impl>();
@@ -846,6 +1051,13 @@ AutomationRuntime::AutomationRuntime(RuntimeBudgets budgets, InstanceIdentity id
     : impl_(std::make_shared<Impl>(budgets, std::move(identity), std::move(clock))) {
     artifacts_ = std::make_shared<ArtifactStore>(budgets.artifact_bytes, budgets.artifact_ttl_s);
     impl_->self_weak = impl_;
+    // Read-side artifact TTL uses the runtime clock (thread-safe for hosts,
+    // single-threaded fake clocks in tests). The weak capture avoids a
+    // cycle; after runtime destruction reads simply never expire.
+    artifacts_->set_read_clock([weak = impl_->self_weak]() -> double {
+        const std::shared_ptr<Impl> impl = weak.lock();
+        return impl ? impl->clock() : 0.0;
+    });
     register_internal_domains();
 }
 
@@ -866,7 +1078,21 @@ void AutomationRuntime::set_instance_capabilities(JsonValue capabilities) {
 }
 
 void AutomationRuntime::set_environment_hooks(RuntimeEnvironmentHooks hooks) {
+    // Unowned installation: replaced by the next one, never revoked by a
+    // registration (kept for hosts that own the hooks' lifetime).
     impl_->env = std::move(hooks);
+    impl_->env_owner_token = 0;
+}
+
+EnvironmentHooksRegistration AutomationRuntime::install_environment_hooks(
+    RuntimeEnvironmentHooks hooks) {
+    const std::uint64_t token = impl_->next_env_token++;
+    impl_->env = std::move(hooks);
+    impl_->env_owner_token = token;
+    auto releaser = std::make_shared<EnvironmentHooksRegistration::Releaser>();
+    releaser->owner = impl_->self_weak;
+    releaser->token = token;
+    return EnvironmentHooksRegistration(std::move(releaser), token);
 }
 
 bool AutomationRuntime::has_method(std::string_view name) const {
@@ -898,7 +1124,11 @@ MethodRegistration AutomationRuntime::register_engine_methods(
 
 ProviderRegistration AutomationRuntime::register_semantic_provider(ISemanticProvider* provider) {
     if (!provider) return {};
-    impl_->semantic_providers_.push_back(provider);
+    // Slots share the node-ref top byte with the engine kinds; once the
+    // space is exhausted, registration fails instead of aliasing.
+    if (impl_->next_semantic_slot_ > 255) return {};
+    const std::uint64_t slot = impl_->next_semantic_slot_++;
+    impl_->semantic_slots_.push_back({slot, provider});
     auto releaser = std::make_shared<ProviderRegistration::Releaser>();
     releaser->owner = impl_->self_weak;
     releaser->slot_id = 0;
@@ -908,7 +1138,8 @@ ProviderRegistration AutomationRuntime::register_semantic_provider(ISemanticProv
 
 ProviderRegistration AutomationRuntime::register_activity_provider(IActivityProvider* provider) {
     if (!provider) return {};
-    impl_->activity_providers_.push_back(provider);
+    const std::uint64_t slot = impl_->next_activity_slot_++;
+    impl_->activity_slots_.push_back({slot, provider});
     auto releaser = std::make_shared<ProviderRegistration::Releaser>();
     releaser->owner = impl_->self_weak;
     releaser->slot_id = 1;
@@ -928,11 +1159,42 @@ ProviderRegistration AutomationRuntime::register_diagnostics_provider(
 }
 
 const std::vector<ISemanticProvider*>& AutomationRuntime::semantic_providers() const {
-    return impl_->semantic_providers_;
+    // Compatibility view rebuilt on demand; callers on the UI thread only.
+    semantic_view_.clear();
+    semantic_view_.reserve(impl_->semantic_slots_.size());
+    for (const Impl::SemanticSlotEntry& entry : impl_->semantic_slots_) {
+        semantic_view_.push_back(entry.provider);
+    }
+    return semantic_view_;
 }
 
 const std::vector<IActivityProvider*>& AutomationRuntime::activity_providers() const {
-    return impl_->activity_providers_;
+    activity_view_.clear();
+    activity_view_.reserve(impl_->activity_slots_.size());
+    for (const Impl::ActivitySlotEntry& entry : impl_->activity_slots_) {
+        activity_view_.push_back(entry.provider);
+    }
+    return activity_view_;
+}
+
+std::vector<AutomationRuntime::SemanticProviderEntry>
+AutomationRuntime::semantic_provider_entries() const {
+    std::vector<SemanticProviderEntry> entries;
+    entries.reserve(impl_->semantic_slots_.size());
+    for (const AutomationRuntime::Impl::SemanticSlotEntry& entry : impl_->semantic_slots_) {
+        entries.push_back({entry.slot, entry.provider});
+    }
+    return entries;
+}
+
+std::vector<AutomationRuntime::ActivityProviderEntry>
+AutomationRuntime::activity_provider_entries() const {
+    std::vector<ActivityProviderEntry> entries;
+    entries.reserve(impl_->activity_slots_.size());
+    for (const AutomationRuntime::Impl::ActivitySlotEntry& entry : impl_->activity_slots_) {
+        entries.push_back({entry.slot, entry.provider});
+    }
+    return entries;
 }
 
 void AutomationRuntime::set_policy(IAutomationPolicy* policy) { impl_->policy = policy; }
@@ -954,6 +1216,12 @@ void AutomationRuntime::set_deferred_wake(std::function<void(double)> wake) {
 
 void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transport_request,
                                 std::string payload) {
+    receive_with_deadline(connection, transport_request, std::move(payload), 0.0);
+}
+
+std::shared_ptr<RequestCancellation> AutomationRuntime::receive_with_deadline(
+    std::uint64_t connection, std::uint64_t transport_request, std::string payload,
+    double response_deadline_s) {
     Impl& impl = *impl_;
     JsonValue doc;
     const JsonParseResult parsed = parse_json_strict(payload, impl.budgets.request_bytes, doc);
@@ -963,7 +1231,7 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
         error.data.set("detail", parsed.detail);
         impl.respond_now(connection, transport_request, JsonValue{}, false,
                          MethodOutcome::failure(std::move(error)));
-        return;
+        return nullptr;
     }
     JsonValue id_echo{};
     bool has_id = false;
@@ -973,13 +1241,13 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
     if (!parse_envelope(doc, id_echo, has_id, method, params, error)) {
         impl.respond_now(connection, transport_request, id_echo, has_id,
                          MethodOutcome::failure(std::move(error)));
-        return;
+        return nullptr;
     }
     if (stopped_.load(std::memory_order_acquire)) {
         impl.respond_now(connection, transport_request, id_echo, has_id,
                          MethodOutcome::failure(
                              Error::make(ErrorCode::Cancelled, "runtime is shutting down")));
-        return;
+        return nullptr;
     }
     // Registry lookup: method must exist; snapshot the descriptor. The
     // rejection response is sent after every lock is released - respond_now
@@ -1012,9 +1280,11 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
                          MethodOutcome::failure(Error::make(
                              ErrorCode::MethodNotFound,
                              "method '" + method + "' is not registered")));
-        return;
+        return nullptr;
     }
     const char* overload_reason = nullptr;
+    std::uint64_t submitted_slot = 0;
+    std::shared_ptr<std::atomic<bool>> cancel_flag;
     {
         std::lock_guard<std::mutex> guard(impl.state_mutex);
         if (impl.queue.size() >= impl.budgets.queue_limit) {
@@ -1039,10 +1309,18 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
                 entry.method = std::move(method);
                 entry.params = std::move(params);
                 entry.submitted = impl.clock();
-                entry.deadline = entry.submitted + descriptor.timeout_s;
+                // A transport-imposed cap keeps requests that outlived the
+                // client's wait from executing later with full credit.
+                const double timeout =
+                    response_deadline_s > 0.0
+                        ? std::min(descriptor.timeout_s, response_deadline_s)
+                        : descriptor.timeout_s;
+                entry.deadline = entry.submitted + timeout;
                 entry.domain_token = domain_token;
                 entry.slot = impl.next_slot++;
                 entry.cancel_flag = std::make_shared<std::atomic<bool>>(false);
+                submitted_slot = entry.slot;
+                cancel_flag = entry.cancel_flag;
                 impl.queue.push_back(std::move(entry));
             }
         }
@@ -1051,7 +1329,7 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
         impl.respond_now(connection, transport_request, id_echo, has_id,
                          MethodOutcome::failure(
                              Error::make(ErrorCode::Overloaded, overload_reason)));
-        return;
+        return nullptr;
     }
     std::function<void()> wake;
     {
@@ -1059,6 +1337,11 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
         wake = impl.wake_callback;
     }
     if (wake) wake();
+    auto control = std::make_shared<RequestCancellation::Control>();
+    control->owner = impl_->self_weak;
+    control->slot = submitted_slot;
+    control->flag = std::move(cancel_flag);
+    return std::shared_ptr<RequestCancellation>(new RequestCancellation(std::move(control)));
 }
 
 void AutomationRuntime::connection_closed(std::uint64_t connection) {
@@ -1074,11 +1357,30 @@ void AutomationRuntime::connection_closed(std::uint64_t connection) {
             (void)entry;
             if (entry.connection == connection) to_cancel.push_back(slot);
         }
+        impl.closed_connections.push_back(connection);
     }
     for (const std::uint64_t slot : to_cancel) {
         impl.settle(slot, MethodOutcome::failure(Error::make(
                               ErrorCode::Cancelled, "connection closed before completion")));
     }
+    // Observers (input release) run on the next UI drain; wake for it.
+    std::function<void()> wake;
+    {
+        std::lock_guard<std::mutex> guard(impl.state_mutex);
+        wake = impl.wake_callback;
+    }
+    if (wake) wake();
+}
+
+ConnectionObserverRegistration AutomationRuntime::add_connection_observer(
+    std::function<void(std::uint64_t connection)> handler) {
+    if (!handler) return {};
+    const std::uint64_t token = impl_->next_observer_token++;
+    impl_->connection_observers.emplace_back(token, std::move(handler));
+    auto releaser = std::make_shared<ConnectionObserverRegistration::Releaser>();
+    releaser->owner = impl_->self_weak;
+    releaser->token = token;
+    return ConnectionObserverRegistration(std::move(releaser));
 }
 
 void AutomationRuntime::shutdown(double) {
@@ -1189,7 +1491,42 @@ void AutomationRuntime::drain(double now) {
     // workers before evaluating anything.
     impl.purge_retired_conditions();
 
-    // 1. Sweep executing requests for deadline and cancellation.
+    // Connection close notifications queued by workers run here, on the UI
+    // thread, before new work starts (bridges release held input).
+    impl.notify_closed_connections();
+
+    // 1. Sweep queued requests for cancellation and expiry, then executing
+    // requests for the same. Queued entries never execute past a cancel or
+    // deadline even when the queue head blocks on slower work.
+    {
+        std::vector<PendingRequest> dropped;
+        {
+            std::lock_guard<std::mutex> guard(impl.state_mutex);
+            for (auto it = impl.queue.begin(); it != impl.queue.end();) {
+                const bool cancelled = it->cancel_flag && it->cancel_flag->load();
+                if (cancelled || now >= it->deadline) {
+                    dropped.push_back(std::move(*it));
+                    it = impl.queue.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (PendingRequest& entry : dropped) {
+            const bool cancelled = entry.cancel_flag && entry.cancel_flag->load();
+            Error error = cancelled
+                ? Error::make(ErrorCode::Cancelled, "request was cancelled before execution")
+                : Error::make(ErrorCode::DeadlineExceeded,
+                              "request expired before execution");
+            error.data.set("requestId", request_id_of(entry.id_echo));
+            impl.respond_now(entry.connection, entry.transport_request, entry.id_echo,
+                             entry.has_id, MethodOutcome::failure(std::move(error)));
+            impl.log("info",
+                     std::string(cancelled ? "cancelled queued: " : "expired queued: ") +
+                         entry.method,
+                     request_id_of(entry.id_echo));
+        }
+    }
     std::vector<std::uint64_t> expired;
     {
         std::lock_guard<std::mutex> guard(impl.state_mutex);
@@ -1231,6 +1568,17 @@ void AutomationRuntime::drain(double now) {
             impl.respond_now(entry.connection, entry.transport_request, entry.id_echo,
                              entry.has_id, MethodOutcome::failure(std::move(error)));
             impl.log("info", "expired queued: " + entry.method, request_id_of(entry.id_echo));
+            continue;
+        }
+        // Cancellation that raced with this dequeue (RequestCancellation or
+        // connection_closed removed the entry a beat too late): answer
+        // Cancelled instead of executing.
+        if (entry.cancel_flag && entry.cancel_flag->load()) {
+            impl.respond_now(entry.connection, entry.transport_request, entry.id_echo,
+                             entry.has_id,
+                             MethodOutcome::failure(Error::make(
+                                 ErrorCode::Cancelled,
+                                 "request was cancelled before execution")));
             continue;
         }
         // Snapshot the descriptor and handler.
@@ -1555,16 +1903,13 @@ void AutomationRuntime::register_internal_domains() {
             if (context.method == "Operation.wait") {
                 const OperationRecord& record = it->second;
                 if (record.info.state != OperationState::Running) {
-                    if (record.info.state == OperationState::Completed) {
-                        sink(MethodOutcome::success(operation_to_wire(record.info)));
-                    } else {
-                        sink(MethodOutcome::failure(Error::make(
-                            ErrorCode::InvalidOperationState,
-                            "operation finished with state " +
-                                std::string(record.info.state == OperationState::Failed
-                                                ? "failed"
-                                                : "cancelled"))));
-                    }
+                    // Terminal on arrival: the wait reports the operation's
+                    // full terminal state - identical shape to a wait that
+                    // observed the transition, so scripts never read a
+                    // failed operation as wait success.
+                    JsonValue result = operation_to_wire(record.info);
+                    result.set("waitedS", 0.0);
+                    sink(MethodOutcome::success(std::move(result)));
                     return;
                 }
                 // Custom timeout: extend this request's deadline.
@@ -1593,17 +1938,32 @@ void AutomationRuntime::register_internal_domains() {
                     const auto op_it = impl_->operations.find(id);
                     if (op_it == impl_->operations.end()) {
                         // Terminal records are erased after finish; treat
-                        // disappearance as completed (Operation.get can no
+                        // disappearance as finished (Operation.get can no
                         // longer see it either).
                         describe = "operation finished";
-                        return true;
+                        return ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied};
                     }
                     if (op_it->second.info.state != OperationState::Running) {
                         describe = "operation finished";
-                        return true;
+                        return ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied};
                     }
                     describe = "operation still running";
-                    return false;
+                    return ConditionRecord::Eval{ConditionRecord::Eval::State::Pending};
+                };
+                // Fold the terminal state into the wait response.
+                record_ref.decorate = [this, id](JsonValue& result) {
+                    const auto op_it = impl_->operations.find(id);
+                    if (op_it == impl_->operations.end()) {
+                        result.set("operationId", id_to_wire(id));
+                        result.set("state", "evicted");
+                        result.set("note",
+                                   "the terminal record was pruned before the wait settled");
+                        return;
+                    }
+                    const JsonValue wire = operation_to_wire(op_it->second.info);
+                    for (const auto& [key, value] : wire.members()) {
+                        result.set(key, value);
+                    }
                 };
                 sink = CompletionSink{};   // deferred; never settled here
                 // Guard against a captured-null sink misuse: mark deferred.
@@ -1716,30 +2076,67 @@ void AutomationRuntime::register_internal_domains() {
             record.operation = operation;
 
             if (condition == "activityQuiet") {
+                // Bind the wait to the providers that recognize the scope
+                // now: their later disappearance fails the wait instead of
+                // reading as "no pending work".
                 bool known = false;
-                for (IActivityProvider* candidate : impl_->activity_providers_) {
+                for (const Impl::ActivitySlotEntry& entry : impl_->activity_slots_) {
                     ActivityReport report;
-                    if (candidate->activity(scope, report)) {
+                    if (entry.provider->activity(scope, report)) {
                         known = true;
-                        break;
+                        record.activity_slots.push_back(entry.slot);
                     }
                 }
                 if (!known) {
-                    sink(MethodOutcome::failure(impl_->activity_providers_.empty()
+                    sink(MethodOutcome::failure(impl_->activity_slots_.empty()
                             ? Error::unsupported(
                                   "no activity provider is registered for this instance")
                             : Error::unsupported("unknown activity scope '" + scope + "'")));
                     return;
                 }
-                record.check = [this, scope](std::string& describe) {
+                record.check = [this, scope, required = record.activity_slots](
+                                   std::string& describe) {
+                    // Providers present when the wait started must still be
+                    // registered and still know the scope.
+                    for (const std::uint64_t slot : required) {
+                        const auto it = std::find_if(
+                            impl_->activity_slots_.begin(), impl_->activity_slots_.end(),
+                            [slot](const Impl::ActivitySlotEntry& entry) {
+                                return entry.slot == slot;
+                            });
+                        if (it == impl_->activity_slots_.end()) {
+                            describe = "the activity provider observing scope '" + scope +
+                                       "' was unregistered";
+                            return ConditionRecord::Eval{
+                                ConditionRecord::Eval::State::Failed,
+                                Error::make(ErrorCode::ProviderUnavailable,
+                                            "the activity provider observing scope '" +
+                                                scope + "' was unregistered")};
+                        }
+                        ActivityReport report;
+                        if (!it->provider->activity(scope, report)) {
+                            describe = "activity scope '" + scope +
+                                       "' is no longer known by its provider";
+                            return ConditionRecord::Eval{
+                                ConditionRecord::Eval::State::Failed,
+                                Error::make(ErrorCode::ProviderUnavailable,
+                                            "activity scope '" + scope +
+                                                "' is no longer known by its provider")};
+                        }
+                    }
+                    // Pending totals come from every provider that knows the
+                    // scope right now (later registrations included, so new
+                    // work can delay the wait but never fake quiet).
                     std::size_t total = 0;
-                    for (IActivityProvider* candidate : impl_->activity_providers_) {
+                    for (const Impl::ActivitySlotEntry& entry : impl_->activity_slots_) {
                         ActivityReport current;
-                        if (candidate->activity(scope, current)) total += current.pending;
+                        if (entry.provider->activity(scope, current)) total += current.pending;
                     }
                     describe = "scope '" + scope + "' has " + std::to_string(total) +
                                " pending tasks";
-                    return total == 0;
+                    return total == 0
+                        ? ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied}
+                        : ConditionRecord::Eval{ConditionRecord::Eval::State::Pending};
                 };
             } else if (condition == "nodeAppears") {
                 if (!impl_->env.node_exists) {
@@ -1751,7 +2148,9 @@ void AutomationRuntime::register_internal_domains() {
                     const bool exists = impl_->env.node_exists(window, stable_key);
                     describe = exists ? "node '" + stable_key + "' present"
                                       : "node '" + stable_key + "' not present yet";
-                    return exists;
+                    return exists
+                        ? ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied}
+                        : ConditionRecord::Eval{ConditionRecord::Eval::State::Pending};
                 };
             } else if (condition == "operationDone") {
                 const auto op_it = impl_->operations.find(operation);
@@ -1766,10 +2165,10 @@ void AutomationRuntime::register_internal_domains() {
                     if (target == impl_->operations.end() ||
                         target->second.info.state != OperationState::Running) {
                         describe = "operation finished";
-                        return true;
+                        return ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied};
                     }
                     describe = "operation still running";
-                    return false;
+                    return ConditionRecord::Eval{ConditionRecord::Eval::State::Pending};
                 };
             } else if (condition == "animationSettled") {
                 if (!impl_->env.animation_active) {
@@ -1780,7 +2179,9 @@ void AutomationRuntime::register_internal_domains() {
                 record.check = [this, window](std::string& describe) {
                     const bool active = impl_->env.animation_active(window);
                     describe = active ? "animations still running" : "animations settled";
-                    return !active;
+                    return !active
+                        ? ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied}
+                        : ConditionRecord::Eval{ConditionRecord::Eval::State::Pending};
                 };
             } else if (condition == "frameStable") {
                 if (!impl_->env.frame_serial) {
@@ -1795,7 +2196,9 @@ void AutomationRuntime::register_internal_domains() {
                     const std::uint64_t serial = impl_->env.frame_serial(window);
                     describe = "frame " + std::to_string(serial) + " of target " +
                                std::to_string(target);
-                    return serial >= target && target > 0;
+                    return serial >= target && target > 0
+                        ? ConditionRecord::Eval{ConditionRecord::Eval::State::Satisfied}
+                        : ConditionRecord::Eval{ConditionRecord::Eval::State::Pending};
                 };
             } else {
                 sink(MethodOutcome::failure(

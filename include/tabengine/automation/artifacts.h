@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -42,13 +43,23 @@ public:
     std::string store(std::vector<std::uint8_t> bytes, std::string media_type, JsonValue target,
                       double now);
 
-    // Copies the entry out when it exists and has not expired.
+    // Copies the entry out when it exists and has not expired. The
+    // parameterless reads check the TTL against the read clock installed
+    // below (the runtime's clock), so an expired artifact answers false
+    // even when no drain has swept it yet; without an installed clock the
+    // reads do not expire (value-only tests).
     [[nodiscard]] bool get(std::string_view id, Entry& out) const;
+    [[nodiscard]] bool get(std::string_view id, Entry& out, double now) const;
     // Metadata-only view for Artifact.get responses.
     [[nodiscard]] bool metadata(std::string_view id, JsonValue& out) const;
+    [[nodiscard]] bool metadata(std::string_view id, JsonValue& out, double now) const;
     // Drops expired entries; called before every store and by the runtime
     // drain so a TTL always takes effect without external traffic.
     void expire(double now);
+    // Thread-safe source of "now" for read-side TTL checks (the runtime
+    // installs its own clock). Called from transport worker threads; must
+    // not call back into the store.
+    void set_read_clock(std::function<double()> clock);
 
     [[nodiscard]] std::size_t bytes_used() const { return bytes_used_; }
     [[nodiscard]] std::size_t count() const { return entries_.size(); }
@@ -64,6 +75,7 @@ private:
     std::uint64_t next_id_ = 1;
     std::unordered_map<std::string, Entry> entries_;
     std::deque<std::string> order_;
+    std::function<double()> read_clock_;   // optional; guards read-side TTL
 };
 
 // Lowercase hex SHA-256 of a byte range.
