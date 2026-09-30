@@ -386,6 +386,15 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                     "Input.releaseAll first")));
                 return;
             }
+            for (const auto& [connection, other] : sessions) {
+                if (connection != context.connection && other.pointer_window == window &&
+                    other.held_buttons != 0) {
+                    sink(MethodOutcome::failure(Error::make(
+                        ErrorCode::SessionConflict,
+                        "another session holds the pointer on this window")));
+                    return;
+                }
+            }
             // Node mode: resolve a semantic node and click its current hit
             // position. A snapshot id may pin the layout revision; without
             // `strict` the click recomputes geometry for animation movement.
@@ -510,6 +519,15 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                         "Input.releaseAll first")));
                     return;
                 }
+                for (const auto& [connection, other] : sessions) {
+                    if (connection != context.connection && other.pointer_window == window &&
+                        other.held_buttons != 0) {
+                        sink(MethodOutcome::failure(Error::make(
+                            ErrorCode::SessionConflict,
+                            "another session holds the pointer on this window")));
+                        return;
+                    }
+                }
                 Event down;
                 down.type = EventType::PointerDown;
                 down.window = window;
@@ -582,6 +600,15 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                     "this session already holds the pointer on another window; call "
                     "Input.releaseAll first")));
                 return;
+            }
+            for (const auto& [connection, other] : sessions) {
+                if (connection != context.connection && other.pointer_window == window &&
+                    other.held_buttons != 0) {
+                    sink(MethodOutcome::failure(Error::make(
+                        ErrorCode::SessionConflict,
+                        "another session holds the pointer on this window")));
+                    return;
+                }
             }
             std::int64_t steps = 14;
             if (const JsonValue* value = context.params.find("steps");
@@ -685,7 +712,6 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                     }
                 }
             }
-            session.held_buttons = 0;
             session.pointer_window = 0;
             if (!attached_or_lost) {
                 current = window_of_tab(tab);

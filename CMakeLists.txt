@@ -231,6 +231,15 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_link_libraries(tabengine_windows_renderer_test PRIVATE tabengine_skia user32)
         tabengine_deploy_skia_dll(tabengine_windows_renderer_test)
         add_test(NAME tabengine_windows_renderer_test COMMAND tabengine_windows_renderer_test)
+
+        add_executable(tabengine_automation_bridge_test tests/automation_bridge_test.cpp)
+        target_include_directories(tabengine_automation_bridge_test PRIVATE "${TABENGINE_SKIA_ROOT}")
+        target_compile_definitions(tabengine_automation_bridge_test PRIVATE
+            SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
+        target_link_libraries(tabengine_automation_bridge_test
+            PRIVATE tabengine_automation_shell)
+        tabengine_deploy_skia_dll(tabengine_automation_bridge_test)
+        add_test(NAME tabengine_automation_bridge_test COMMAND tabengine_automation_bridge_test)
     endif()
 endif()
 

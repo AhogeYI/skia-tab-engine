@@ -243,7 +243,10 @@ TabId Shell::new_tab(WindowId window) {
     if (id) {
         (void)model_.select_tab(window, id);
         client_.tab_attached(window, id, created.content);
-        if (previous != id) client_.active_tab_changed(window, previous, id);
+        if (previous != id) {
+            client_.active_tab_changed(window, previous, id);
+            notify_selected(window, previous, id);
+        }
         sync_visuals(window, id);
         platform_.invalidate(window);
         notify([&](ShellObserver& observer) {
@@ -300,7 +303,10 @@ bool Shell::close_tab(WindowId window, TabId tab) {    const WindowTabs* w = mod
     }
     (void)model_.set_tab_closing(window, tab);
     if (previous == tab && next) (void)model_.select_tab(window, next);
-    if (previous == tab && next) client_.active_tab_changed(window, previous, next);
+    if (previous == tab && next) {
+        client_.active_tab_changed(window, previous, next);
+        notify_selected(window, previous, next);
+    }
     sync_visuals(window);
     platform_.invalidate(window);
     busy_windows_.erase(window);
@@ -321,10 +327,12 @@ bool Shell::select_tab(WindowId window, TabId tab) {
         busy_windows_.erase(window);
         return false;
     }
-    if (previous != tab) client_.active_tab_changed(window, previous, tab);
+    if (previous != tab) {
+        client_.active_tab_changed(window, previous, tab);
+        notify_selected(window, previous, tab);
+    }
     platform_.invalidate(window);
     busy_windows_.erase(window);
-    notify([&](ShellObserver& observer) { observer.tab_selected(window, tab); });
     return true;
 }
 
@@ -370,7 +378,11 @@ bool Shell::transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t inde
     const TabId source_current = model_.window(from)->active;
     if (source_active != source_current)
         client_.active_tab_changed(from, source_active, source_current);
-    if (target_active != tab) client_.active_tab_changed(to, target_active, tab);
+        notify_selected(from, source_active, source_current);
+    if (target_active != tab) {
+        client_.active_tab_changed(to, target_active, tab);
+        notify_selected(to, target_active, tab);
+    }
     sync_visuals(from);
     sync_visuals(to, tab);
     platform_.invalidate(to);
@@ -1552,6 +1564,11 @@ void Shell::add_observer(ShellObserver* observer) {
 
 void Shell::remove_observer(ShellObserver* observer) {
     std::erase(observers_, observer);
+}
+
+void Shell::notify_selected(WindowId window, TabId previous, TabId current) {
+    if (previous == current || current == 0) return;
+    notify([&](ShellObserver& observer) { observer.tab_selected(window, current); });
 }
 
 std::uint64_t Shell::frame_serial(WindowId window) const {

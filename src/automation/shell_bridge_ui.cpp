@@ -65,6 +65,7 @@ JsonValue node_to_wire(const SemanticNode& node) {
     JsonValue actions = JsonValue::array();
     for (const std::string& action : node.actions) actions.push_back(action);
     value.set("actions", std::move(actions));
+    if (!node.details.is_null()) value.set("details", node.details);
     return value;
 }
 
@@ -127,6 +128,10 @@ bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned 
                 out.actions = {"select", "close", "reorder", "drag"};
                 out.node = engine_node_ref(kNodeTab, local);
                 out.content = it->content;
+                JsonValue details = JsonValue::object();
+                details.set("tabId", id_to_wire(local));
+                details.set("contentId", id_to_wire(it->content));
+                out.details = std::move(details);
                 return true;
             }
         }

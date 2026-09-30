@@ -271,6 +271,7 @@ private:
     void notify(Fn&& callback) {
         for (ShellObserver* observer : observers_) callback(*observer);
     }
+    void notify_selected(WindowId window, TabId previous, TabId current);
 };
 
 } // namespace tabengine
