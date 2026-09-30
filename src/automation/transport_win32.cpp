@@ -182,6 +182,22 @@ std::string response_head(int status, std::string_view content_type, std::size_t
     return head;
 }
 
+// Fixed-work comparison: no early exit on the first differing byte, and
+// the loop length depends only on the longer input, so a probing client
+// cannot learn the token's content or length from response timing.
+bool constant_time_equal(const std::string& received, const std::string& expected) {
+    const std::size_t length = std::max(received.size(), expected.size());
+    unsigned difference = static_cast<unsigned>(received.size() ^ expected.size());
+    for (std::size_t i = 0; i < length; ++i) {
+        const auto byte_of = [](const std::string& text, std::size_t index) {
+            return index < text.size() ? static_cast<unsigned char>(text[index])
+                                       : static_cast<unsigned char>(0);
+        };
+        difference |= static_cast<unsigned>(byte_of(received, i) ^ byte_of(expected, i));
+    }
+    return difference == 0;
+}
+
 } // namespace
 
 struct AutomationTransport::Impl {
@@ -313,7 +329,7 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
         return;
     }
     const std::string expected = "Bearer " + config.token;
-    if (authorization != expected) {
+    if (!constant_time_equal(authorization, expected)) {
         bump([](Stats& stats) { ++stats.rejected; ++stats.auth_failures; });
         const std::uint64_t failures = auth_failures.fetch_add(1) + 1;
         if (failures >= config.auth_failure_limit) {
