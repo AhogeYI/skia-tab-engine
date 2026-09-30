@@ -9,9 +9,9 @@
 //   tabengine_automation_demo.exe --self-check
 //
 // opens a hidden raster window, starts the transport on an OS-assigned
-// port and performs real HTTP JSON-RPC calls against itself (info,
-// semantic snapshot, semantic node click, application method, condition
-// wait, screenshot artifact fetch with PNG validation), then prints a JSON
+// port and performs six real JSON-RPC calls against itself (info, semantic
+// snapshot, semantic node click, application state, condition wait,
+// capture) plus one artifact fetch with PNG validation, then prints a JSON
 // summary and exits 0.
 
 #include "tabengine/automation/runtime.h"
@@ -424,10 +424,10 @@ int run_self_check(std::uint16_t port, const std::string& token, int& steps) {
                      png.status, png.body.size());
         return 7;
     }
-    steps += 1;
-    std::printf("{\"selfCheck\":\"passed\",\"rpcCalls\":%d,\"artifact\":\"%s\","
-                "\"pngBytes\":%zu}\n",
-                steps, artifact.c_str(), png.body.size());
+    steps += 1;   // the artifact fetch is HTTP but not JSON-RPC
+    std::printf("{\"selfCheck\":\"passed\",\"rpcCalls\":%d,\"httpCalls\":%d,"
+                "\"artifact\":\"%s\",\"pngBytes\":%zu}\n",
+                steps - 1, steps, artifact.c_str(), png.body.size());
     return 0;
 }
 

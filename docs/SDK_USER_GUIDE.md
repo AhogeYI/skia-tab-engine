@@ -127,10 +127,10 @@ cmake --build "build/automation-$config" --config $config
 ./build/automation-$config/$config/tabengine_automation_demo.exe --self-check --raster
 ```
 
-`--self-check` starts the transport on an OS-assigned port and performs real
-HTTP JSON-RPC calls against itself (info, semantic snapshot, semantic click,
-application state, condition wait, screenshot, artifact fetch with PNG
-validation). Without `--self-check` it opens a normal window; pass
+`--self-check` starts the transport on an OS-assigned port and performs six
+real JSON-RPC calls against itself (info, semantic snapshot, semantic click,
+application state, condition wait, capture) plus one artifact fetch with PNG
+validation. Without `--self-check` it opens a normal window; pass
 `--descriptor-out FILE --token-out FILE` to publish the connection descriptor
 and token for tools. The packaged `tools/automation/te.py` CLI drives any
 instance:
