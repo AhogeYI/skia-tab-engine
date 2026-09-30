@@ -69,10 +69,42 @@ int check_set_client_bounds(tabengine::IPlatform& platform) {
     return 0;
 }
 
+// A hidden window keeps its client geometry and accepts new placement -
+// the resident-instance contract behind Window.setPlacement hide.
+int check_hide_show(tabengine::IPlatform& platform) {
+    constexpr tabengine::WindowId id = 2;
+    if (!platform.create(id, {80, 90, 300, 200}, "hide test", /*visible=*/false)) {
+        return fail("create");
+    }
+    platform.hide(id);
+    const tabengine::Size hidden_size = platform.client_size(id);
+    if (hidden_size.width != 300 || hidden_size.height != 200) {
+        std::printf("FAIL hidden client size %dx%d, want 300x200\n", hidden_size.width,
+                    hidden_size.height);
+        platform.destroy(id);
+        return 1;
+    }
+    if (!platform.set_client_bounds(id, {10, 20, 240, 160})) {
+        platform.destroy(id);
+        return fail("set_client_bounds while hidden");
+    }
+    platform.show(id);
+    const tabengine::Size shown_size = platform.client_size(id);
+    if (shown_size.width != 240 || shown_size.height != 160) {
+        std::printf("FAIL shown client size %dx%d, want 240x160\n", shown_size.width,
+                    shown_size.height);
+        platform.destroy(id);
+        return 1;
+    }
+    platform.destroy(id);
+    return 0;
+}
+
 int main() {
     std::unique_ptr<tabengine::IPlatform> platform = tabengine::make_win32_platform();
     if (!platform) return fail("make_win32_platform");
     if (const int result = check_set_client_bounds(*platform)) return result;
+    if (const int result = check_hide_show(*platform)) return result;
     std::printf("win32 platform bounds test passed\n");
     return 0;
 }

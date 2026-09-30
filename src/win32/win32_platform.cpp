@@ -159,6 +159,14 @@ public:
         }
     }
 
+    void hide(WindowId id) override {
+        if (HWND hwnd = handle(id)) {
+            // No activation, no animation: a resident instance leaves the
+            // screen while keeping its surface and state alive.
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
     void destroy(WindowId id) override {
         if (emitting_ > 0) {
             if (std::find(pending_destroy_.begin(), pending_destroy_.end(), id) ==

@@ -202,7 +202,9 @@ so hosts can tighten or widen a live session.
 
 - Input coordinates are client pixels of the target window by default.
   Snapshots and captures report the same space; DPI scale is reported per
-  window (`Window.list`).
+  window (`Window.list`); hiding (`Window.setPlacement` state `hide`)
+  keeps the instance resident - surfaces, tabs and input sessions stay
+  alive while off-screen.
 - The semantic tree merges the engine's chrome (window, tab strip, tabs,
   close buttons, new-tab button, caption buttons/area, body) with every
   registered provider's subtree under the body node. Node refs embed the

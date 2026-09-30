@@ -313,6 +313,7 @@ void ShellAutomationBridge::Impl::publish_capabilities() {
     capabilities.set("nativeWindowMove", platform.supports_native_move_loop());
     capabilities.set("windowActivate", true);
     capabilities.set("windowBounds", true);
+    capabilities.set("windowHide", true);
     JsonValue capture = JsonValue::object();
     capture.set("supported", renderer.supports_capture());
     capture.set("raster", renderer_backend == "raster");
@@ -378,11 +379,14 @@ void ShellAutomationBridge::Impl::register_window_tab_domains() {
                           {"windowId", "bounds"}),
             JsonValue::object()));
         methods.push_back(descriptor(
-            "Window.setPlacement", "Minimize or toggle maximization for a window.",
+            "Window.setPlacement",
+            "Minimize, toggle maximization, or hide/show a window. Hiding keeps the "
+            "instance resident: surfaces, tabs and input sessions stay alive.",
             {mutate}, true,
             object_schema({
                 {"windowId", string_property("Target window (decimal id string)")},
-                {"state", enum_property("Placement action", {"minimize", "toggleMaximize"})},
+                {"state", enum_property("Placement action",
+                                        {"minimize", "toggleMaximize", "hide", "show"})},
             },
                           {"windowId", "state"}),
             JsonValue::object()));
@@ -477,6 +481,10 @@ void ShellAutomationBridge::Impl::register_window_tab_domains() {
                 platform.minimize(window);
             } else if (action == "toggleMaximize") {
                 platform.toggle_maximize(window);
+            } else if (action == "hide") {
+                platform.hide(window);
+            } else if (action == "show") {
+                platform.show(window);
             } else {
                 sink(MethodOutcome::failure(
                     Error::invalid_params("params.state: unknown placement action")));

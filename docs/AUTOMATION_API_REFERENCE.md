@@ -199,7 +199,9 @@ path-qualified (`params.windowId: expected string`).
 - `set_renderer_backend(name)`: wire label reported by capabilities
   (`"raster"`, `"d3d12"`).
 - Registered engine domains: `Window` (list/get/create/close/activate/
-  setBounds/setPlacement with honest `closed`/`denied` outcomes), `Tab`
+  setBounds/setPlacement - minimize, toggleMaximize, hide/show (hiding
+  keeps the instance resident) - with honest `closed`/`denied` outcomes),
+  `Tab`
   (list/create/select/close/move/transfer), `Input` (click with node mode
   and strict layout checks, pointer, drag, key, typeText, wheel, ime,
   releaseAll), `UI` (snapshot, resolveNode), `Capture` (screenshot),
@@ -249,7 +251,9 @@ change product callback order.
 ## platform.h - platform capabilities
 
 Optional virtuals with default-absent behavior: `activate`,
-`set_client_bounds`, `begin_move_session`/`end_move_session` (stepwise
-tear-off drags), `request_delayed_wake` (bounded wait polling). Event
+`set_client_bounds`, `hide` (leave the screen without destroying state -
+resident instances; restore with `show`), `begin_move_session`/
+`end_move_session` (stepwise tear-off drags), `request_delayed_wake`
+(bounded wait polling). Event
 extensions: `KeyUp`, `MoveEnded`, wheel `wheel_x`, `click_count`,
 `buttons` bitmask and `repeat`. The Win32 backend implements all of them.

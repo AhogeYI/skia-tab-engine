@@ -143,6 +143,11 @@ public:
     virtual void release_pointer() = 0;
     virtual void minimize(WindowId id) = 0;
     virtual void toggle_maximize(WindowId id) = 0;
+    // Remove the window from the screen without destroying it - resident
+    // instances stay alive (surfaces, tabs, input sessions) while hidden.
+    // Restore with show(); unlike minimize, hiding never animates or
+    // activates anything. Absent by default.
+    virtual void hide(WindowId id) { (void)id; }
     [[nodiscard]] virtual Size client_size(WindowId id) const = 0;
     [[nodiscard]] virtual Point client_origin(WindowId id) const = 0;
     [[nodiscard]] virtual float scale(WindowId id) const = 0;

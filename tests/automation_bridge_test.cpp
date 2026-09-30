@@ -109,15 +109,16 @@ public:
         windows_.emplace(id, bounds);
         return true;
     }
-    void show(tabengine::WindowId) override {}
+    void show(tabengine::WindowId id) override { shown_.push_back(id); }
     void destroy(tabengine::WindowId id) override { windows_.erase(id); }
     void invalidate(tabengine::WindowId) override {}
     double monotonic_seconds() const override { return platform_now; }
     void request_animation_frame(tabengine::WindowId) override {}
     void capture_pointer(tabengine::WindowId) override {}
     void release_pointer() override {}
-    void minimize(tabengine::WindowId) override {}
+    void minimize(tabengine::WindowId id) override { minimized_.push_back(id); }
     void toggle_maximize(tabengine::WindowId) override {}
+    void hide(tabengine::WindowId id) override { hidden_.push_back(id); }
     tabengine::Size client_size(tabengine::WindowId id) const override {
         const auto& rect = windows_.at(id);
         return {rect.width, rect.height};
@@ -165,6 +166,9 @@ public:
     int run() override { return 0; }
 
     std::vector<tabengine::WindowId> activated_;
+    std::vector<tabengine::WindowId> minimized_;
+    std::vector<tabengine::WindowId> hidden_;
+    std::vector<tabengine::WindowId> shown_;
     bool inject_competing_move = false;
     int move_session_ends = 0;
 
@@ -1260,6 +1264,38 @@ void test_double_click_release_click_counts() {
     }
 }
 
+// Window.setPlacement routes hide/show to the platform; hiding is the
+// resident-instance path (state stays alive).
+void test_window_hide_show_placement() {
+    Harness harness;
+    harness.call(360,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Window.setPlacement","params":{"windowId":"1","state":"hide"}})");
+    CHECK(harness.result(360).is_object());
+    CHECK(harness.platform.hidden_.size() == 1);
+    CHECK(harness.platform.hidden_[0] == 1);
+
+    // The window and its automation surface stay alive while hidden.
+    harness.call(361,
+                 R"({"jsonrpc":"2.0","id":2,"method":"Tab.list","params":{"windowId":"1"}})");
+    CHECK(harness.result(361).find("tabs")->size() == 1);
+
+    const std::size_t shown_before = harness.platform.shown_.size();   // setup shows the window
+    harness.call(362,
+                 R"({"jsonrpc":"2.0","id":3,"method":"Window.setPlacement","params":{"windowId":"1","state":"show"}})");
+    CHECK(harness.result(362).is_object());
+    CHECK(harness.platform.shown_.size() == shown_before + 1);
+    CHECK(harness.platform.shown_.back() == 1);
+
+    // Unknown actions still fail validation.
+    harness.call(363,
+                 R"({"jsonrpc":"2.0","id":4,"method":"Window.setPlacement","params":{"windowId":"1","state":"teleport"}})");
+    CHECK(harness.error(363).find("code")->as_integer() == -32602);
+
+    // The capability block reports the hide support.
+    harness.call(364, R"({"jsonrpc":"2.0","id":5,"method":"System.getInfo"})");
+    CHECK(harness.result(364).find("capabilities")->find("windowHide")->as_boolean() == true);
+}
+
 } // namespace
 
 int main() {
@@ -1280,5 +1316,6 @@ int main() {
     test_snapshot_with_many_tabs();
     test_competing_input_during_stepwise_move();
     test_double_click_release_click_counts();
+    test_window_hide_show_placement();
     return 0;
 }
