@@ -595,10 +595,21 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
             host_request.query =
                 query_at == std::string::npos ? std::string{} : target.substr(query_at + 1);
             host_request.body = body;
+            const ArtifactReader artifact_reader =
+                [this](const std::string& id, std::string& bytes, std::string& media_type) {
+                    ArtifactStore::Entry entry;
+                    if (id.empty() || !runtime.artifacts().get(id, entry)) return false;
+                    bytes.assign(reinterpret_cast<const char*>(entry.bytes.data()),
+                                 entry.bytes.size());
+                    media_type = entry.media_type;
+                    return true;
+                };
             const RouteReply host_reply = route_handler(
-                host_request, [this, connection](std::string payload, double timeout_s) {
+                host_request,
+                [this, connection](std::string payload, double timeout_s) {
                     return rpc_round_trip(connection, std::move(payload), timeout_s);
-                });
+                },
+                artifact_reader);
             if (host_reply.status != 0) {
                 bump([](Stats& stats) { ++stats.requests; });
                 send_simple(socket, host_reply.status, host_reply.content_type,

@@ -108,7 +108,13 @@ public:
         std::string body;
     };
     using RpcCall = std::function<std::string(std::string payload, double timeout_s)>;
-    using RouteHandler = std::function<RouteReply(const RouteRequest&, const RpcCall&)>;
+    // Reads artifact bytes by id (false when unknown or expired). Serves
+    // host routes that relay binary results (e.g. screenshots captured
+    // through Capture.screenshot).
+    using ArtifactReader =
+        std::function<bool(const std::string& id, std::string& bytes, std::string& media_type)>;
+    using RouteHandler =
+        std::function<RouteReply(const RouteRequest&, const RpcCall&, const ArtifactReader&)>;
     void set_route_handler(RouteHandler handler);
     // Audit hook for refused authentication: invoked on the worker thread
     // with the failure count and whether the lockout was armed. Never

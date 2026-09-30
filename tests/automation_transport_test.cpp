@@ -709,6 +709,9 @@ void test_slow_client_deadline_and_bounded_stop() {
 void test_extra_routes_and_auth_callback() {
     Clock clock;
     AutomationRuntime runtime{{}, {"1.0", "0.1.0", "extra-routes"}, std::ref(clock)};
+    const std::string runtime_artifact_note =
+        runtime.artifacts().store(std::vector<std::uint8_t>{9, 8, 7}, "application/octet-stream",
+                                  JsonValue::object(), clock.now_value);
     TransportConfig config;
     config.token = "tok";
     config.response_timeout_s = 2.0;
@@ -720,8 +723,11 @@ void test_extra_routes_and_auth_callback() {
         seen_locked.store(locked || seen_locked.load());
     });
     transport.set_route_handler(
-        [](const AutomationTransport::RouteRequest& request,
-           const AutomationTransport::RpcCall& call) -> AutomationTransport::RouteReply {
+        [note = runtime_artifact_note](
+            const AutomationTransport::RouteRequest& request,
+            const AutomationTransport::RpcCall& call,
+            const AutomationTransport::ArtifactReader& artifacts)
+            -> AutomationTransport::RouteReply {
             if (request.method == "GET" && request.path == "/health") {
                 return {200, "application/json", R"({"ok":true})"};
             }
@@ -732,6 +738,13 @@ void test_extra_routes_and_auth_callback() {
                     return {503, "application/json", R"({"error":"no response"})"};
                 }
                 return {200, "application/json", envelope};
+            }
+            if (request.method == "GET" && request.path == "/bytes") {
+                // Artifact bytes flow to host routes after a capture.
+                std::string bytes;
+                std::string media_type;
+                if (!artifacts(note, bytes, media_type)) return {};
+                return {200, media_type, bytes};
             }
             return {};   // decline everything else
         });
@@ -779,6 +792,16 @@ void test_extra_routes_and_auth_callback() {
         CHECK(result != nullptr);
         CHECK(result->find("instanceId")->is_string());
     }
+
+    // Artifact bytes are readable from host routes.
+    const HttpResponse bytes = pump([&] {
+        return http_request(transport.port(),
+                            "GET /bytes HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            "Authorization: Bearer tok\r\n\r\n");
+    });
+    CHECK(bytes.status == 200);
+    CHECK(bytes.body == std::string({static_cast<char>(9), static_cast<char>(8),
+                                     static_cast<char>(7)}));
 
     // Declined host routes answer the transport's 404.
     const HttpResponse declined = pump([&] {
