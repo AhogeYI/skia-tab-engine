@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(TabEngine VERSION 0.1.0 LANGUAGES CXX)
+project(TabEngine VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -154,7 +154,8 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     # In-repo build of the SDK-only example (the packaged copy uses
     # examples/automation_demo/CMakeLists.txt with find_package).
     add_executable(tabengine_automation_demo examples/automation_demo/main.cpp)
-    target_compile_definitions(tabengine_automation_demo PRIVATE UNICODE _UNICODE)
+    target_compile_definitions(tabengine_automation_demo PRIVATE UNICODE _UNICODE
+        TABENGINE_DEMO_ENGINE_VERSION="${PROJECT_VERSION}")
     target_include_directories(tabengine_automation_demo PRIVATE "${TABENGINE_SKIA_ROOT}")
     target_compile_definitions(tabengine_automation_demo PRIVATE
         SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
@@ -192,6 +193,7 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
             NAMESPACE TabEngine:: DESTINATION lib/cmake/TabEngine)
         install(DIRECTORY include/ DESTINATION include)
         install(FILES SDK_PACKAGE_README.md DESTINATION . RENAME README.md)
+        install(FILES RELEASE_NOTES.md DESTINATION .)
         install(FILES docs/SDK_USER_GUIDE.md docs/API_REFERENCE.md
             docs/AUTOMATION_GUIDE.md docs/AUTOMATION_API_REFERENCE.md DESTINATION docs)
         install(DIRECTORY examples/sdk_hello_tabs/ DESTINATION examples/sdk_hello_tabs)

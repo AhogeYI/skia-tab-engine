@@ -377,7 +377,8 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
         path = stage / relative
         if not path.is_file() or hash_file(path) != expected:
             raise SystemExit(f"SDK file mismatch: {relative}")
-    for relative in ("README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
+    for relative in ("README.md", "RELEASE_NOTES.md", "LICENSE", "NOTICE",
+                     "THIRD_PARTY_NOTICES.md",
                      "docs/SDK_USER_GUIDE.md",
                      "docs/API_REFERENCE.md", "examples/sdk_hello_tabs/CMakeLists.txt",
                      "examples/sdk_hello_tabs/main.cpp",

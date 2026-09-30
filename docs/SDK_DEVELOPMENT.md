@@ -157,7 +157,7 @@ cmake_minimum_required(VERSION 3.24)
 project(MyTabbedApp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(TABENGINE_SDK_ROOT "" CACHE PATH "Extracted TabEngine SDK root")
-find_package(TabEngine 0.1.0 EXACT CONFIG REQUIRED
+find_package(TabEngine 0.2.0 EXACT CONFIG REQUIRED
     PATHS "${TABENGINE_SDK_ROOT}" NO_DEFAULT_PATH)
 add_executable(my_tabbed_app main.cpp)
 target_link_libraries(my_tabbed_app PRIVATE TabEngine::SDK)

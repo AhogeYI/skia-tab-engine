@@ -466,7 +466,7 @@ int main(int argc, char** argv) {
 
     automation::AutomationRuntime runtime(
         {},
-        {"1.0", "0.1.0", "automation_demo", "1.0",
+        {"1.0", TABENGINE_DEMO_ENGINE_VERSION, "automation_demo", "1.0",
          "sdk", "demo-" + std::to_string(GetCurrentProcessId())},
         [&platform] { return platform->monotonic_seconds(); });
     automation::ShellAutomationBridge bridge({shell, *platform, *renderer, runtime});
