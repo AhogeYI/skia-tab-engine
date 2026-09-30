@@ -187,6 +187,10 @@ public:
     void paint_body(tabengine::WindowId, tabengine::TabId, SkCanvas&, tabengine::Rect) override {}
     void body_event(const tabengine::Event& event, tabengine::Rect) override {
         ++body_events_;
+        if (event.type == tabengine::EventType::PointerMove) {
+            last_move_buttons = event.buttons;
+            last_move_button = static_cast<int>(event.button);
+        }
         if (event.type == tabengine::EventType::PointerDown ||
             event.type == tabengine::EventType::PointerUp) {
             body_click_counts.push_back(
@@ -196,6 +200,8 @@ public:
     }
     // ("down"|"up", click_count) for body pointer events, in arrival order.
     std::vector<std::pair<std::string, int>> body_click_counts;
+    unsigned last_move_buttons = 0;
+    int last_move_button = 0;
     bool allow_close_window(tabengine::WindowId window) override {
         return veto_windows_.count(window) == 0;
     }
@@ -429,6 +435,13 @@ void test_input_sessions_and_keys() {
                             R"({"jsonrpc":"2.0","id":26,"method":"Input.releaseAll"})");
     harness.runtime.drain(harness.clock.now_value);
     CHECK(harness.result(26).is_object());
+
+    // Coordinate clicks in the body area reach the product client.
+    const int body_before = harness.client.body_events_;
+    harness.call(27,
+                 R"({"jsonrpc":"2.0","id":27,"method":"Input.click","params":{"windowId":"1","x":50,"y":250}})");
+    CHECK(harness.result(27).find("clicked")->as_integer() == 1);
+    CHECK(harness.client.body_events_ >= body_before + 2);
 }
 
 void test_keyboard_release_survives_pointer_release() {
@@ -1114,6 +1127,7 @@ void test_http_input_sessions_end_to_end() {
     // Session: down -> move -> up across three requests, one identity.
     const std::string session = session_begin();
     CHECK(session.size() >= 32);
+    client.last_move_buttons = 0;
     const HttpReply s_down = rpc(
         R"({"jsonrpc":"2.0","id":3,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":40,"y":300}})",
         session);
@@ -1122,6 +1136,8 @@ void test_http_input_sessions_end_to_end() {
         R"({"jsonrpc":"2.0","id":4,"method":"Input.pointer","params":{"windowId":"1","kind":"move","x":80,"y":320}})",
         session);
     CHECK(s_move.status == 200 && !s_move.rpc_error);
+    CHECK(client.last_move_buttons == tabengine::kPointerButtonLeft);   // held carried
+    CHECK(client.last_move_button == static_cast<int>(tabengine::PointerButton::Left));
     const HttpReply s_up = rpc(
         R"({"jsonrpc":"2.0","id":5,"method":"Input.pointer","params":{"windowId":"1","kind":"up","x":80,"y":320}})",
         session);
@@ -1169,6 +1185,96 @@ void test_http_input_sessions_end_to_end() {
     const HttpReply after_end = rpc(
         R"({"jsonrpc":"2.0","id":7,"method":"System.getInfo"})", session);
     CHECK(after_end.status == 404);
+
+    // Host-mounted route relaying input on a minted session: the legacy
+    // gesture pattern (per-request HTTP, one stable identity).
+    const std::string gesture_session = transport.create_session();
+    transport.set_route_handler(
+        [&gesture_session](const automation::AutomationTransport::RouteRequest& request,
+                           const automation::AutomationTransport::RpcCall& call,
+                           const automation::AutomationTransport::ArtifactReader&)
+            -> automation::AutomationTransport::RouteReply {
+            if (request.method != "POST" || request.path != "/gesture") {
+                return automation::AutomationTransport::RouteReply{};
+            }
+            const std::string envelope = call(request.body, 8.0, gesture_session);
+            if (envelope.empty()) {
+                return automation::AutomationTransport::RouteReply{
+                    503, "application/json",
+                    "{\"error\":\"no response\",\"sid\":\"" + gesture_session + "\"}"};
+            }
+            return automation::AutomationTransport::RouteReply{200, "application/json",
+                                                               envelope};
+        });
+    client.last_move_buttons = 0;
+    // The legacy shape: plain envelopes POSTed to the host route, no
+    // session header - the route pins the identity itself.
+    const auto gesture = [&](const char* envelope) {
+        std::string request = "POST /gesture HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        request += "Authorization: Bearer " + config.token + "\r\n";
+        request += "Content-Type: application/json\r\n";
+        request += "Content-Length: " + std::to_string(std::strlen(envelope)) + "\r\n\r\n";
+        request += envelope;
+        SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(transport.port());
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+        CHECK(connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        CHECK(send(socket, request.data(), static_cast<int>(request.size()), 0) ==
+              static_cast<int>(request.size()));
+        char buffer[4096];
+        std::string raw;
+        while (true) {
+            const int got = recv(socket, buffer, sizeof(buffer), 0);
+            if (got <= 0) break;
+            raw.append(buffer, static_cast<std::size_t>(got));
+        }
+        closesocket(socket);
+        const std::size_t body_start = raw.find("\r\n\r\n");
+        HttpReply reply;
+        reply.status = std::atoi(raw.substr(9, 3).c_str());
+        if (body_start != std::string::npos) reply.body = raw.substr(body_start + 4);
+        JsonValue parsed;
+        if (reply.status == 200 &&
+            automation::parse_json_strict(reply.body, 65536, parsed).status ==
+                automation::JsonParseStatus::Ok) {
+            if (const JsonValue* error = parsed.find("error")) {
+                reply.rpc_error = true;
+                reply.error_code = error->find("code")->as_integer();
+            }
+        }
+        return reply;
+    };
+    // Pump the runtime on this thread while each gesture request runs on
+    // a client thread (the transport worker relays through the session).
+    const auto gesture_pumped = [&](const char* envelope) {
+        HttpReply reply;
+        std::atomic<bool> done{false};
+        std::thread client_thread([&] {
+            reply = gesture(envelope);
+            done.store(true);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!done.load()) {
+            runtime.drain(clock.now_value);
+            clock.now_value += 0.001;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            CHECK(std::chrono::steady_clock::now() < deadline);
+        }
+        client_thread.join();
+        return reply;
+    };
+    const HttpReply g_down = gesture_pumped(
+        R"({"jsonrpc":"2.0","id":1,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":40,"y":300}})");
+    CHECK(g_down.status == 200 && !g_down.rpc_error);
+    const HttpReply g_move = gesture_pumped(
+        R"({"jsonrpc":"2.0","id":2,"method":"Input.pointer","params":{"windowId":"1","kind":"move","x":80,"y":320}})");
+    CHECK(g_move.status == 200 && !g_move.rpc_error);
+    CHECK(client.last_move_buttons == tabengine::kPointerButtonLeft);
+    const HttpReply g_up = gesture_pumped(
+        R"({"jsonrpc":"2.0","id":3,"method":"Input.pointer","params":{"windowId":"1","kind":"up","x":80,"y":320}})");
+    CHECK(g_up.status == 200 && !g_up.rpc_error);
 
     transport.stop();
 }

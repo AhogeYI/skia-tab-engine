@@ -734,7 +734,7 @@ void test_extra_routes_and_auth_callback() {
             }
             if (request.method == "POST" && request.path == "/relay") {
                 const std::string envelope =
-                    call(R"({"jsonrpc":"2.0","id":"x","method":"System.getInfo"})", 2.0);
+                    call(R"({"jsonrpc":"2.0","id":"x","method":"System.getInfo"})", 2.0, "");
                 if (envelope.empty()) {
                     return {503, "application/json", R"({"error":"no response"})"};
                 }

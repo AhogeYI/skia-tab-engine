@@ -113,13 +113,13 @@ public:
     };
     // `session` optionally names a logical session (see create_session);
     // empty runs the request on the incoming connection's identity.
+    using RpcCall = std::function<std::string(
+        std::string payload, double timeout_s, const std::string& session)>;
     // Reads artifact bytes by id (false when unknown or expired). Serves
     // host routes that relay binary results (e.g. screenshots captured
     // through Capture.screenshot).
     using ArtifactReader =
         std::function<bool(const std::string& id, std::string& bytes, std::string& media_type)>;
-    using RpcCall = std::function<std::string(
-        std::string payload, double timeout_s, const std::string& session)>;
     using RouteHandler =
         std::function<RouteReply(const RouteRequest&, const RpcCall&, const ArtifactReader&)>;
     void set_route_handler(RouteHandler handler);
