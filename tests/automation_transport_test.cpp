@@ -703,6 +703,108 @@ void test_slow_client_deadline_and_bounded_stop() {
     closesocket(dangling);
 }
 
+// Host-mounted routes: same token and framing, static replies, relayed
+// JSON-RPC through the runtime, declines falling through to 404, and the
+// auth-failure audit hook.
+void test_extra_routes_and_auth_callback() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0", "extra-routes"}, std::ref(clock)};
+    TransportConfig config;
+    config.token = "tok";
+    config.response_timeout_s = 2.0;
+    AutomationTransport transport{runtime, config};
+    std::atomic<std::uint64_t> seen_failures{0};
+    std::atomic<bool> seen_locked{false};
+    transport.set_auth_failure_callback([&](std::uint64_t failures, bool locked) {
+        seen_failures.store(failures);
+        seen_locked.store(locked || seen_locked.load());
+    });
+    transport.set_route_handler(
+        [](const AutomationTransport::RouteRequest& request,
+           const AutomationTransport::RpcCall& call) -> AutomationTransport::RouteReply {
+            if (request.method == "GET" && request.path == "/health") {
+                return {200, "application/json", R"({"ok":true})"};
+            }
+            if (request.method == "POST" && request.path == "/relay") {
+                const std::string envelope =
+                    call(R"({"jsonrpc":"2.0","id":"x","method":"System.getInfo"})", 2.0);
+                if (envelope.empty()) {
+                    return {503, "application/json", R"({"error":"no response"})"};
+                }
+                return {200, "application/json", envelope};
+            }
+            return {};   // decline everything else
+        });
+    CHECK(transport.start());
+
+    const auto pump = [&](const std::function<HttpResponse()>& request) {
+        HttpResponse response;
+        std::atomic<bool> done{false};
+        std::thread client([&] {
+            response = request();
+            done.store(true);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!done.load()) {
+            runtime.drain(clock.now_value);
+            clock.now_value += 0.001;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            CHECK(std::chrono::steady_clock::now() < deadline);
+        }
+        client.join();
+        return response;
+    };
+
+    // Static host route answers with its own body.
+    const HttpResponse health = pump([&] {
+        return http_request(transport.port(),
+                            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            "Authorization: Bearer tok\r\n\r\n");
+    });
+    CHECK(health.status == 200);
+    CHECK(health.body == R"({"ok":true})");
+
+    // Relayed route reaches the runtime through the same queue.
+    const HttpResponse relay = pump([&] {
+        return http_request(transport.port(),
+                            "POST /relay HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            "Authorization: Bearer tok\r\nContent-Length: 0\r\n\r\n");
+    });
+    CHECK(relay.status == 200);
+    {
+        JsonValue envelope;
+        CHECK(parse_json_strict(relay.body, 65536, envelope).status ==
+              automation::JsonParseStatus::Ok);
+        const JsonValue* result = envelope.find("result");
+        CHECK(result != nullptr);
+        CHECK(result->find("instanceId")->is_string());
+    }
+
+    // Declined host routes answer the transport's 404.
+    const HttpResponse declined = pump([&] {
+        return http_request(transport.port(),
+                            "GET /declined HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            "Authorization: Bearer tok\r\n\r\n");
+    });
+    CHECK(declined.status == 404);
+
+    // The same surface refuses bad tokens and reports to the audit hook.
+    const HttpResponse denied = http_request(
+        transport.port(),
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer bad\r\n\r\n");
+    CHECK(denied.status == 401);
+    CHECK(seen_failures.load() == 1);
+
+    // Engine routes keep working alongside the mounted ones.
+    const HttpResponse rpc = pump([&] {
+        return http_request(transport.port(), rpc_request("tok",
+            R"({"jsonrpc":"2.0","id":1,"method":"System.getInfo"})"));
+    });
+    CHECK(rpc.status == 200);
+
+    transport.stop();
+}
+
 } // namespace
 
 int main() {
@@ -717,5 +819,6 @@ int main() {
     test_artifact_route_uses_policy_and_grants();
     test_artifact_ttl_expires_without_drain();
     test_slow_client_deadline_and_bounded_stop();
+    test_extra_routes_and_auth_callback();
     return 0;
 }

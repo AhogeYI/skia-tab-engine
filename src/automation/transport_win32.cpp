@@ -244,6 +244,11 @@ struct AutomationTransport::Impl {
     std::atomic<std::uint64_t> auth_failures{0};
     std::atomic<double> auth_lock_until{0.0};
 
+    // Host-mounted routes and the auth audit hook; installed before start()
+    // (single-threaded publication, worker-thread reads afterwards).
+    AutomationTransport::RouteHandler route_handler;
+    std::function<void(std::uint64_t, bool)> auth_failure_callback;
+
     [[nodiscard]] double monotonic() const {
         using namespace std::chrono;
         return duration<double>(steady_clock::now().time_since_epoch()).count();
@@ -332,11 +337,60 @@ struct AutomationTransport::Impl {
     void handle_connection(SOCKET socket, std::uint64_t connection);
     void accept_loop();
     void reap_finished_workers();
+    // One JSON-RPC exchange against the runtime with the transport's
+    // deadline and cancellation; returns the envelope ("" on timeout/stop).
+    // Shared by the RPC route and the host-mounted route handler's `call`.
+    [[nodiscard]] std::string rpc_round_trip(std::uint64_t connection, std::string body,
+                                             double timeout_s);
     static std::string url_path_only(const std::string& target) {
         const std::size_t query = target.find('?');
         return query == std::string::npos ? target : target.substr(0, query);
     }
 };
+
+std::string AutomationTransport::Impl::rpc_round_trip(std::uint64_t connection,
+                                                      std::string body, double timeout_s) {
+    const double wait_s = timeout_s > 0.0 ? timeout_s : config.response_timeout_s;
+    const std::uint64_t transport_request = next_transport_request.fetch_add(1);
+    auto pending = std::make_shared<Pending>();
+    {
+        std::lock_guard<std::mutex> guard(pendings_mutex);
+        pendings.emplace(transport_request, pending);
+    }
+    // Assignment under the pending mutex: stop() reads the handle through
+    // the same mutex and must never miss a just-submitted request.
+    {
+        auto cancellation =
+            runtime.receive_with_deadline(connection, transport_request, std::move(body), wait_s);
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        pending->cancellation = std::move(cancellation);
+    }
+    std::string payload;
+    {
+        std::unique_lock<std::mutex> lock(pending->mutex);
+        if (!pending->ready.wait_for(lock, std::chrono::duration<double>(wait_s),
+                                     [&] { return pending->responded || stop_.load(); })) {
+            bump([](Stats& stats) { ++stats.timeouts; });
+        }
+        payload = pending->payload;
+    }
+    {
+        std::lock_guard<std::mutex> guard(pendings_mutex);
+        pendings.erase(transport_request);
+    }
+    if (payload.empty()) {
+        // Cancel precisely: a still-queued request is dropped, an executing
+        // one settles Cancelled at the next drain (already-executed side
+        // effects stay queryable through the operation record).
+        std::shared_ptr<RequestCancellation> cancellation;
+        {
+            std::lock_guard<std::mutex> lock(pending->mutex);
+            cancellation = pending->cancellation;
+        }
+        if (cancellation) cancellation->cancel();
+    }
+    return payload;
+}
 
 void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t connection) {
     SocketGuard guard(socket);
@@ -416,10 +470,12 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     if (!constant_time_equal(authorization, expected)) {
         bump([](Stats& stats) { ++stats.rejected; ++stats.auth_failures; });
         const std::uint64_t failures = auth_failures.fetch_add(1) + 1;
-        if (failures >= config.auth_failure_limit) {
+        const bool locked = failures >= config.auth_failure_limit;
+        if (locked) {
             auth_failures.store(0);
             auth_lock_until.store(monotonic() + config.auth_lockout_s);
         }
+        if (auth_failure_callback) auth_failure_callback(failures, locked);
         send_simple(socket, 401, "application/json",
                     json_error_payload(401, "missing or invalid token"), monotonic() + config.io_timeout_s);
         return;
@@ -527,6 +583,29 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     } else if (method == "POST" && path == "/automation/v1/schema") {
         route = Route::Schema;
     } else if (!(method == "POST" && path == "/automation/v1/rpc")) {
+        // Not an engine route: offer it to the host-mounted handler first.
+        // Same token, framing and loopback boundary; UI work flows back
+        // through `call` on the runtime's queue. A declined reply
+        // (status 0) falls through to the engine's 404.
+        if (route_handler) {
+            const std::size_t query_at = target.find('?');
+            RouteRequest host_request;
+            host_request.method = method;
+            host_request.path = path;
+            host_request.query =
+                query_at == std::string::npos ? std::string{} : target.substr(query_at + 1);
+            host_request.body = body;
+            const RouteReply host_reply = route_handler(
+                host_request, [this, connection](std::string payload, double timeout_s) {
+                    return rpc_round_trip(connection, std::move(payload), timeout_s);
+                });
+            if (host_reply.status != 0) {
+                bump([](Stats& stats) { ++stats.requests; });
+                send_simple(socket, host_reply.status, host_reply.content_type,
+                            host_reply.body, monotonic() + config.io_timeout_s);
+                return;
+            }
+        }
         bump([](Stats& stats) { ++stats.rejected; });
         send_simple(socket, 404, "application/json",
                     json_error_payload(404, "unknown route"), respond_deadline);
@@ -580,50 +659,14 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
         ephemeral = false;
     }
 
-    const std::uint64_t transport_request = next_transport_request.fetch_add(1);
-    auto pending = std::make_shared<Pending>();
-    {
-        std::lock_guard<std::mutex> guard(pendings_mutex);
-        pendings.emplace(transport_request, pending);
-    }
     bump([](Stats& stats) { ++stats.requests; });
     // The response timeout also caps the runtime deadline, and the returned
     // handle cancels the request when the transport gives up on it, so a
     // queued mutation never executes after the client saw a failure.
-    // Assignment happens under the pending mutex: stop() reads the handle
-    // through the same mutex and must never miss a just-submitted request.
-    {
-        auto cancellation = runtime.receive_with_deadline(connection, transport_request,
-                                                          std::move(body),
-                                                          config.response_timeout_s);
-        std::lock_guard<std::mutex> lock(pending->mutex);
-        pending->cancellation = std::move(cancellation);
-    }
+    std::string payload =
+        rpc_round_trip(connection, std::move(body), config.response_timeout_s);
 
-    std::string payload;
-    {
-        std::unique_lock<std::mutex> lock(pending->mutex);
-        if (!pending->ready.wait_for(lock,
-                                     std::chrono::duration<double>(config.response_timeout_s),
-                                     [&] { return pending->responded || stop_.load(); })) {
-            bump([](Stats& stats) { ++stats.timeouts; });
-        }
-        payload = pending->payload;
-    }
-    {
-        std::lock_guard<std::mutex> guard(pendings_mutex);
-        pendings.erase(transport_request);
-    }
     if (payload.empty()) {
-        // Cancel precisely: a still-queued request is dropped, an executing
-        // one settles Cancelled at the next drain (already-executed side
-        // effects stay queryable through the operation record).
-        std::shared_ptr<RequestCancellation> cancellation;
-        {
-            std::lock_guard<std::mutex> lock(pending->mutex);
-            cancellation = pending->cancellation;
-        }
-        if (cancellation) cancellation->cancel();
         send_simple(socket, 503, "application/json",
                     json_error_payload(503, "no response before the transport deadline"),
                     monotonic() + config.io_timeout_s);
@@ -927,6 +970,15 @@ std::string AutomationTransport::describe() const {
 AutomationTransport::Stats AutomationTransport::stats() const {
     std::lock_guard<std::mutex> guard(impl_->stats_mutex);
     return impl_->stats_value;
+}
+
+void AutomationTransport::set_route_handler(RouteHandler handler) {
+    impl_->route_handler = std::move(handler);
+}
+
+void AutomationTransport::set_auth_failure_callback(
+    std::function<void(std::uint64_t failures, bool locked)> callback) {
+    impl_->auth_failure_callback = std::move(callback);
 }
 
 } // namespace tabengine::automation

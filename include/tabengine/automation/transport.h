@@ -87,6 +87,35 @@ public:
     };
     [[nodiscard]] Stats stats() const;
 
+    // ---- host-mounted routes ----
+    // Embedders may serve additional HTTP routes (product-compat surfaces)
+    // behind the SAME token, framing and loopback checks as the engine's
+    // own. The handler runs on a connection worker thread: it must not
+    // touch UI objects. UI work goes through `call`, which submits one
+    // JSON-RPC payload to the runtime with the transport's deadline and
+    // cancellation and returns the response envelope ("" on timeout or
+    // stop). A reply with status 0 declines; the transport then answers
+    // 404. Install before start().
+    struct RouteRequest {
+        std::string method;   // "GET" / "POST"
+        std::string path;     // path only, no query
+        std::string query;    // raw query string, no '?'
+        std::string body;
+    };
+    struct RouteReply {
+        int status = 0;                                    // 0 = not handled
+        std::string content_type = "application/json";
+        std::string body;
+    };
+    using RpcCall = std::function<std::string(std::string payload, double timeout_s)>;
+    using RouteHandler = std::function<RouteReply(const RouteRequest&, const RpcCall&)>;
+    void set_route_handler(RouteHandler handler);
+    // Audit hook for refused authentication: invoked on the worker thread
+    // with the failure count and whether the lockout was armed. Never
+    // receives the token. Install before start().
+    void set_auth_failure_callback(
+        std::function<void(std::uint64_t failures, bool locked)> callback);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
