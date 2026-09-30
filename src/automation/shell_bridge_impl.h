@@ -31,11 +31,26 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     AutomationRuntime& runtime;
     std::string renderer_backend = "unknown";
     std::vector<MethodRegistration> owned_domains;
+    // Revoked when this Impl dies: wait hooks must never outlive the object
+    // they capture, and closed connections must release held input.
+    ConnectionObserverRegistration connection_observer;
+    EnvironmentHooksRegistration hooks_registration;
 
     // ---- semantic bookkeeping (UI thread) ----
     struct WindowSemantic {
+        // Shell-side counters bumped by shell observations.
         std::uint64_t revision = 1;
         std::uint64_t layout_revision = 1;
+        // Merged counters: shell counters plus every provider-reported
+        // revision change (including attach/detach). Monotonic per window;
+        // strict snapshot checks compare against these, so a provider DOM
+        // rebuild invalidates old refs even when the shell itself was idle.
+        std::uint64_t merged_revision = 1;
+        std::uint64_t merged_layout_revision = 1;
+        std::uint64_t document_generation = 0;
+        // Last revision/layout_revision each provider slot reported.
+        std::unordered_map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>>
+            provider_revisions;
     };
     std::unordered_map<WindowId, WindowSemantic> semantic;
 
@@ -96,6 +111,14 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     void bump_revisions(WindowId window, bool layout_too);
     void emit_simple(std::string_view name, WindowId window, TabId tab, ContentId content,
                      std::uint64_t generation = 0);
+    // Release one connection's held input (all buttons, keys, IME) and
+    // forget its session; runs on the UI thread from the connection
+    // observer when a logical connection ends.
+    void release_input_session(std::uint64_t connection);
+    // Deliver the release events for one session's held state and reset it.
+    void release_session_input(InputSession& session);
+    // Fold provider-reported revisions into the merged counters.
+    void refresh_provider_revisions(WindowId window);
 
     // ---- trace (UI thread) ----
     struct TraceSpan {
@@ -154,8 +177,23 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     [[nodiscard]] bool resolve_engine_node(WindowId window, unsigned kind, std::uint64_t local,
                                            SemanticNode& out) const;
     [[nodiscard]] bool engine_node_exists(WindowId window, std::string_view stable_key) const;
+    // Authoritative node-ref resolution across the merged tree: engine
+    // kinds resolve from the shell, provider slots through the owning
+    // provider's resolve_node. A ref whose slot is unknown (unregistered
+    // provider) or whose provider rejects it never matches a substitute.
+    [[nodiscard]] bool resolve_node_ref(WindowId window, std::uint64_t node,
+                                        SemanticNode& out) const;
+    // Stable business identity resolution against the current tree.
+    [[nodiscard]] bool resolve_stable_key(WindowId window, std::string_view key,
+                                          SemanticNode& out) const;
     [[nodiscard]] SemanticSnapshot build_snapshot(WindowId window, std::size_t max_nodes,
                                                   bool& truncated);
+    // Click point inside the visible portion (bounds ∩ clip).
+    [[nodiscard]] static Point interactable_point(const SemanticNode& node);
+    // Strict-snapshot check for node/stableKey callers: compares the
+    // snapshot's pinned revision against the CURRENT merged layout revision
+    // (refreshed from providers first). Returns false + error on mismatch.
+    [[nodiscard]] bool strict_snapshot_mismatch(WindowId window, const JsonValue& params);
 };
 
 } // namespace tabengine::automation

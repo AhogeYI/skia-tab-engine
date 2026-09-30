@@ -78,6 +78,14 @@ Rect intersect(const Rect& a, const Rect& b) {
     return {left, top, right - left, bottom - top};
 }
 
+// Effective clip for a provider node inside the merged tree: the body
+// (provider) viewport intersected with the provider's own clip. An empty
+// provider clip means fully clipped per the SemanticNode contract.
+Rect merged_clip(const Rect& bounds, const Rect& provider_clip, const Rect& node_clip) {
+    if (node_clip.width <= 0 || node_clip.height <= 0) return {};
+    return intersect(intersect(bounds, provider_clip), node_clip);
+}
+
 const JsonValue kObjectSchema = [] {
     JsonValue schema = JsonValue::object();
     schema.set("type", "object");
@@ -238,15 +246,147 @@ bool ShellAutomationBridge::Impl::engine_node_exists(WindowId window,
         return false;
     }
     // Ask application providers.
-    for (ISemanticProvider* provider : runtime.semantic_providers()) {
+    for (const AutomationRuntime::SemanticProviderEntry& entry :
+         runtime.semantic_provider_entries()) {
         SemanticSnapshot snapshot;
-        if (provider->provide_semantic(window, snapshot)) {
+        if (entry.provider->provide_semantic(window, snapshot)) {
             for (const SemanticNode& candidate : snapshot.nodes) {
                 if (candidate.stable_key == stable_key) return true;
             }
         }
     }
     return false;
+}
+
+// ---- merged-tree node resolution ----
+
+bool ShellAutomationBridge::Impl::resolve_node_ref(WindowId window, std::uint64_t node,
+                                                   SemanticNode& out) const {
+    const unsigned slot = static_cast<unsigned>(node >> 56);
+    const std::uint64_t local = node & 0x00FFFFFFFFFFFFFFull;
+    if (slot == 0) return false;
+    if (slot < kNodeProviderBase) return resolve_engine_node(window, slot, local, out);
+    // Provider subtree: only the provider that issued the ref may resolve
+    // it. Slots are never reused, so an unregistered provider's refs fail
+    // instead of matching whatever provider took its place.
+    for (const AutomationRuntime::SemanticProviderEntry& entry :
+         runtime.semantic_provider_entries()) {
+        if (entry.slot != slot) continue;
+        SemanticNode provider_node;
+        if (!entry.provider->resolve_node(window, local, provider_node)) return false;
+        out = std::move(provider_node);
+        out.node = node;
+        out.window = window;
+        const Rect body = shell.body_bounds(window);
+        out.clip = merged_clip(out.bounds, body, out.clip);
+        return true;
+    }
+    return false;
+}
+
+bool ShellAutomationBridge::Impl::resolve_stable_key(WindowId window, std::string_view key,
+                                                     SemanticNode& out) const {
+    const auto starts_with = [](std::string_view text, std::string_view prefix) {
+        return text.starts_with(prefix);
+    };
+    if (key == "window" || key == "body" || key == "newTab" || key == "captionArea" ||
+        starts_with(key, "caption:")) {
+        std::uint64_t index = 0;
+        const unsigned kind = key == "window"        ? kNodeWindow
+                              : key == "body"        ? kNodeBody
+                              : key == "newTab"      ? kNodeNewTab
+                              : key == "captionArea" ? kNodeCaptionArea
+                                                     : kNodeCaption;
+        if (kind == kNodeCaption) {
+            if (!id_from_wire(key.substr(8), index)) return false;
+            return resolve_engine_node(window, kind, index, out);
+        }
+        return resolve_engine_node(window, kind, 0, out);
+    }
+    if (starts_with(key, "tab:")) {
+        std::uint64_t tab = 0;
+        if (!id_from_wire(key.substr(4), tab)) return false;
+        return resolve_engine_node(window, kNodeTab, tab, out);
+    }
+    if (starts_with(key, "tabClose:")) {
+        std::uint64_t tab = 0;
+        if (!id_from_wire(key.substr(9), tab)) return false;
+        return resolve_engine_node(window, kNodeTabClose, tab, out);
+    }
+    // Application providers: stable keys enumerate their subtrees (the
+    // contract offers no key-based resolve); the merged ref is remapped
+    // through the provider's stable slot.
+    const Rect body = shell.body_bounds(window);
+    for (const AutomationRuntime::SemanticProviderEntry& entry :
+         runtime.semantic_provider_entries()) {
+        SemanticSnapshot scratch;
+        if (!entry.provider->provide_semantic(window, scratch)) continue;
+        for (SemanticNode node : scratch.nodes) {
+            if (node.stable_key != key) continue;
+            node.node = (entry.slot << 56) | (node.node & 0x00FFFFFFFFFFFFFFull);
+            node.parent = 0;
+            node.window = window;
+            node.clip = merged_clip(node.bounds, body, node.clip);
+            out = std::move(node);
+            return true;
+        }
+    }
+    return false;
+}
+
+Point ShellAutomationBridge::Impl::interactable_point(const SemanticNode& node) {
+    // Click inside the visible portion: partially clipped nodes are hit at
+    // their visible center, never at a covered coordinate.
+    const Rect visible = intersect(node.bounds, node.clip);
+    return {visible.x + visible.width / 2, visible.y + visible.height / 2};
+}
+
+void ShellAutomationBridge::Impl::refresh_provider_revisions(WindowId window) {
+    WindowSemantic& state = semantic[window];
+    std::unordered_set<std::uint64_t> seen_slots;
+    std::uint64_t document_generation = 0;
+    for (const AutomationRuntime::SemanticProviderEntry& entry :
+         runtime.semantic_provider_entries()) {
+        SemanticSnapshot scratch;
+        if (!entry.provider->provide_semantic(window, scratch)) continue;
+        seen_slots.insert(entry.slot);
+        document_generation = std::max(document_generation, scratch.document_generation);
+        const auto it = state.provider_revisions.find(entry.slot);
+        if (it == state.provider_revisions.end()) {
+            // Newly attached provider: the tree changed.
+            ++state.merged_revision;
+            ++state.merged_layout_revision;
+            state.provider_revisions.emplace(
+                    entry.slot, std::make_pair(scratch.revision, scratch.layout_revision));
+        } else {
+            if (it->second.first != scratch.revision) {
+                ++state.merged_revision;
+                it->second.first = scratch.revision;
+            }
+            if (it->second.second != scratch.layout_revision) {
+                ++state.merged_layout_revision;
+                it->second.second = scratch.layout_revision;
+            }
+        }
+    }
+    // Detached providers (slot cached but no longer registered) changed the
+    // tree too; a successor on a new slot never reuses their identity.
+    std::erase_if(state.provider_revisions,
+                  [&seen_slots](const auto& entry) { return !seen_slots.count(entry.first); });
+    state.document_generation = document_generation;
+}
+
+bool ShellAutomationBridge::Impl::strict_snapshot_mismatch(WindowId window,
+                                                           const JsonValue& params) {
+    const JsonValue* snapshot_value = params.find("snapshotId");
+    if (!snapshot_value || !snapshot_value->is_integer()) return false;
+    const bool strict = params.find("strict") && params.find("strict")->is_boolean() &&
+                        params.find("strict")->as_boolean();
+    if (!strict) return false;
+    refresh_provider_revisions(window);
+    const WindowSemantic& state = semantic[window];
+    return snapshot_value->as_integer() !=
+           static_cast<std::int64_t>(state.merged_layout_revision);
 }
 
 // ---- snapshot assembly ----
@@ -256,9 +396,6 @@ SemanticSnapshot ShellAutomationBridge::Impl::build_snapshot(WindowId window,
                                                              bool& truncated) {
     SemanticSnapshot snapshot;
     snapshot.window = window;
-    const WindowSemantic& state = semantic[window];
-    snapshot.revision = state.revision;
-    snapshot.layout_revision = state.layout_revision;
     truncated = false;
     snapshot.total_nodes = 0;
 
@@ -339,16 +476,18 @@ SemanticSnapshot ShellAutomationBridge::Impl::build_snapshot(WindowId window,
         }
     }
 
-    // Application provider subtrees attach under the body node.
-    const Rect provider_clip = body;
-    for (std::size_t slot = 0; slot < runtime.semantic_providers().size(); ++slot) {
-        ISemanticProvider* provider = runtime.semantic_providers()[slot];
+    // Application provider subtrees attach under the body node. Provider
+    // revisions fold into the merged counters BEFORE the snapshot reports
+    // them, so the pinned revision already includes provider state.
+    refresh_provider_revisions(window);
+    for (const AutomationRuntime::SemanticProviderEntry& entry :
+         runtime.semantic_provider_entries()) {
         // Providers fill a scratch snapshot; their node refs are remapped
-        // into the merged tree under the body node.
+        // into the merged tree under the body node, keyed by the
+        // provider's stable registration slot (never a list index).
         SemanticSnapshot scratch;
-        if (!provider->provide_semantic(window, scratch)) continue;
-        const std::uint64_t slot_base =
-            static_cast<std::uint64_t>(kNodeProviderBase + slot) << 56;
+        if (!entry.provider->provide_semantic(window, scratch)) continue;
+        const std::uint64_t slot_base = entry.slot << 56;
         std::unordered_map<std::uint64_t, std::uint64_t> remap;
         for (const SemanticNode& node : scratch.nodes) {
             remap[node.node] = slot_base | (node.node & 0x00FFFFFFFFFFFFFFull);
@@ -363,10 +502,15 @@ SemanticSnapshot ShellAutomationBridge::Impl::build_snapshot(WindowId window,
             node.node = remap[node.node];
             node.parent = node.parent ? remap[node.parent] : body_ref;
             node.window = window;
-            node.clip = intersect(node.bounds, provider_clip);
+            node.clip = merged_clip(node.bounds, body, node.clip);
             snapshot.nodes.push_back(std::move(node));
         }
     }
+
+    const WindowSemantic& state = semantic[window];
+    snapshot.revision = state.merged_revision;
+    snapshot.layout_revision = state.merged_layout_revision;
+    snapshot.document_generation = state.document_generation;
     return snapshot;
 }
 
@@ -434,6 +578,8 @@ void ShellAutomationBridge::Impl::register_ui_domain() {
             result.set("windowId", id_to_wire(window));
             result.set("revision", static_cast<std::int64_t>(snapshot.revision));
             result.set("layoutRevision", static_cast<std::int64_t>(snapshot.layout_revision));
+            result.set("documentGeneration",
+                       static_cast<std::int64_t>(snapshot.document_generation));
             result.set("truncated", truncated);
             result.set("totalNodes", static_cast<std::int64_t>(snapshot.total_nodes));
             JsonValue nodes = JsonValue::array();
@@ -454,33 +600,9 @@ void ShellAutomationBridge::Impl::register_ui_domain() {
                     Error::invalid_params("params.node: not a decimal id string")));
                 return;
             }
-            const unsigned slot = static_cast<unsigned>(node >> 56);
-            const std::uint64_t local = node & 0x00FFFFFFFFFFFFFFull;
-            if (slot < kNodeProviderBase) {
-                found = resolve_engine_node(window, slot, local, resolved);
-            } else {
-                const std::size_t index = slot - kNodeProviderBase;
-                if (index < runtime.semantic_providers().size()) {
-                    SemanticNode provider_node;
-                    if (runtime.semantic_providers()[index]->resolve_node(window, local,
-                                                                          provider_node)) {
-                        resolved = provider_node;
-                        resolved.node = node;
-                        found = true;
-                    }
-                }
-            }
+            found = resolve_node_ref(window, node, resolved);
         } else if (key_value && key_value->is_string()) {
-            bool truncated = false;
-            const SemanticSnapshot snapshot = build_snapshot(window, kMaxSnapshotNodes, truncated);
-            const auto it = std::find_if(snapshot.nodes.begin(), snapshot.nodes.end(),
-                                         [&](const SemanticNode& node) {
-                                             return node.stable_key == key_value->as_string();
-                                         });
-            if (it != snapshot.nodes.end()) {
-                resolved = *it;
-                found = true;
-            }
+            found = resolve_stable_key(window, key_value->as_string(), resolved);
         } else {
             sink(MethodOutcome::failure(Error::invalid_params(
                 "params: provide node or stableKey to resolve")));
@@ -493,8 +615,9 @@ void ShellAutomationBridge::Impl::register_ui_domain() {
         }
         const WindowSemantic& state = semantic[window];
         JsonValue result = node_to_wire(resolved);
-        result.set("revision", static_cast<std::int64_t>(state.revision));
-        result.set("layoutRevision", static_cast<std::int64_t>(state.layout_revision));
+        result.set("revision", static_cast<std::int64_t>(state.merged_revision));
+        result.set("layoutRevision", static_cast<std::int64_t>(state.merged_layout_revision));
+        result.set("documentGeneration", static_cast<std::int64_t>(state.document_generation));
         sink(MethodOutcome::success(std::move(result)));
     };
     owned_domains.push_back(

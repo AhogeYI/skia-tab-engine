@@ -226,6 +226,7 @@ private:
         value.stable_key = std::move(stable_key);
         value.node = ref;
         value.bounds = bounds;
+        value.clip = bounds;   // fully visible; empty would mean fully clipped
         value.actions = std::move(actions);
         return value;
     }

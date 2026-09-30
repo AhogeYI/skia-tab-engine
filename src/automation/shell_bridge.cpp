@@ -133,9 +133,19 @@ ShellAutomationBridge::ShellAutomationBridge(Dependencies dependencies)
     impl_->register_capture_and_trace_domains();
     impl_->install_environment_hooks();
     impl_->publish_capabilities();
+    // Connection ends (session end, idle expiry, transport stop) release
+    // the input that connection holds, on the UI thread.
+    impl_->connection_observer = dependencies.runtime.add_connection_observer(
+        [impl = impl_.get()](std::uint64_t connection) {
+            impl->release_input_session(connection);
+        });
 }
 
-ShellAutomationBridge::~ShellAutomationBridge() = default;
+ShellAutomationBridge::~ShellAutomationBridge() {
+    // Registrations (domains, hooks, observer) revoke themselves here, in
+    // member destruction order; the runtime must simply outlive the bridge.
+    impl_.reset();
+}
 
 void ShellAutomationBridge::set_renderer_backend(std::string backend) {
     impl_->renderer_backend = std::move(backend);
@@ -147,7 +157,11 @@ void ShellAutomationBridge::set_renderer_backend(std::string backend) {
 void ShellAutomationBridge::Impl::bump_revisions(WindowId window, bool layout_too) {
     WindowSemantic& state = semantic[window];
     ++state.revision;
-    if (layout_too) ++state.layout_revision;
+    ++state.merged_revision;
+    if (layout_too) {
+        ++state.layout_revision;
+        ++state.merged_layout_revision;
+    }
 }
 
 void ShellAutomationBridge::Impl::emit_simple(std::string_view name, WindowId window, TabId tab,
@@ -282,7 +296,9 @@ void ShellAutomationBridge::Impl::install_environment_hooks() {
     hooks.node_exists = [this](WindowId window, std::string_view stable_key) {
         return engine_node_exists(window, stable_key);
     };
-    runtime.set_environment_hooks(std::move(hooks));
+    // Owned installation: destroying this bridge revokes the hooks and
+    // fails dependent waits instead of calling into freed memory.
+    hooks_registration = runtime.install_environment_hooks(std::move(hooks));
 }
 
 void ShellAutomationBridge::Impl::publish_capabilities() {

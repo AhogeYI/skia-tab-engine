@@ -270,7 +270,7 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_compile_definitions(tabengine_automation_bridge_test PRIVATE
             SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_automation_bridge_test
-            PRIVATE tabengine_automation_shell)
+            PRIVATE tabengine_automation_shell tabengine_automation_transport)
         tabengine_deploy_skia_dll(tabengine_automation_bridge_test)
         add_test(NAME tabengine_automation_bridge_test COMMAND tabengine_automation_bridge_test)
 

@@ -193,7 +193,7 @@ void ShellAutomationBridge::Impl::register_capture_and_trace_domains() {
              })},
             {"node", string_property("Semantic node ref; captures its bounds")},
             {"snapshotId", integer_property("Snapshot layoutRevision for strict node use", 0)},
-            {"strict", boolean_property("Fail when layoutRevision moved (default false)")},
+            {"strict", boolean_property("Fail when the merged layoutRevision moved (default false)")},
         },
                                      {"windowId"});
         descriptor.result = kObjectSchema;
@@ -229,7 +229,8 @@ void ShellAutomationBridge::Impl::register_capture_and_trace_domains() {
                     Error::invalid_params("params.frame: expected current or fresh")));
                 return;
             }
-            // Region: explicit rect, or a semantic node's current bounds.
+            // Region: explicit rect, or a semantic node's current bounds
+            // resolved through its authoritative owner.
             Rect region = client_rect(platform, window);
             const JsonValue* node_value = context.params.find("node");
             if (node_value && node_value->is_string()) {
@@ -239,31 +240,18 @@ void ShellAutomationBridge::Impl::register_capture_and_trace_domains() {
                         Error::invalid_params("params.node: not a decimal id string")));
                     return;
                 }
-                bool truncated = false;
-                const SemanticSnapshot snapshot = build_snapshot(window, kMaxSnapshotNodes,
-                                                                 truncated);
-                const auto it = std::find_if(
-                    snapshot.nodes.begin(), snapshot.nodes.end(),
-                    [node](const SemanticNode& candidate) { return candidate.node == node; });
-                if (it == snapshot.nodes.end()) {
+                SemanticNode target;
+                if (!resolve_node_ref(window, node, target)) {
                     sink(MethodOutcome::failure(Error::stale_node(
                         "node " + node_value->as_string() + " is not in the current tree")));
                     return;
                 }
-                if (const JsonValue* snapshot_value = context.params.find("snapshotId");
-                    snapshot_value && snapshot_value->is_integer()) {
-                    const bool strict =
-                        context.params.find("strict") &&
-                        context.params.find("strict")->is_boolean() &&
-                        context.params.find("strict")->as_boolean();
-                    if (strict && snapshot_value->as_integer() !=
-                                      static_cast<std::int64_t>(snapshot.layout_revision)) {
-                        sink(MethodOutcome::failure(Error::stale_node(
-                            "layout changed since the snapshot was taken")));
-                        return;
-                    }
+                if (strict_snapshot_mismatch(window, context.params)) {
+                    sink(MethodOutcome::failure(
+                        Error::stale_node("layout changed since the snapshot was taken")));
+                    return;
                 }
-                region = it->bounds;
+                region = target.bounds;
             } else if (const JsonValue* region_value = context.params.find("region");
                        region_value && region_value->is_object()) {
                 if (!rect_from_wire(*region_value, region) || region.width <= 0 ||

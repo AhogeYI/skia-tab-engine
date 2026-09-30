@@ -3,6 +3,7 @@
 // snapshots, node-mode clicks, input sessions, and in-strip drags.
 
 #include "tabengine/automation/shell_bridge.h"
+#include "tabengine/automation/transport.h"
 
 #include "include/core/SkCanvas.h"
 #include "include/core/SkData.h"
@@ -12,10 +13,18 @@
 
 #include "check.h"
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -619,6 +628,526 @@ void test_capture_artifact_and_trace() {
     CHECK(trace.find("active")->as_boolean() == false);
 }
 
+// Closing a connection releases everything its input session holds, on the
+// UI thread: the next client can use the pointer instead of meeting a
+// phantom SessionConflict (regression from the delivery review).
+void test_input_release_on_connection_closed() {
+    Harness harness;
+
+    // Connection 30 holds the pointer, a key and an open IME composition.
+    harness.runtime.receive(30, 200,
+        R"({"jsonrpc":"2.0","id":1,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":40,"y":300}})");
+    harness.runtime.drain(harness.clock.now_value);
+    CHECK(harness.result(200).is_object());
+    harness.runtime.receive(30, 201,
+        R"({"jsonrpc":"2.0","id":2,"method":"Input.key","params":{"windowId":"1","key":"k","kind":"down"}})");
+    harness.runtime.drain(harness.clock.now_value);
+    CHECK(harness.result(201).is_object());
+    harness.runtime.receive(30, 202,
+        R"({"jsonrpc":"2.0","id":3,"method":"Input.ime","params":{"windowId":"1","kind":"start"}})");
+    harness.runtime.drain(harness.clock.now_value);
+    CHECK(harness.result(202).is_object());
+
+    // Another connection cannot press while 30 holds the pointer.
+    harness.runtime.receive(31, 203,
+        R"({"jsonrpc":"2.0","id":4,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":60,"y":300}})");
+    harness.runtime.drain(harness.clock.now_value);
+    CHECK(harness.error(203).find("code")->as_integer() == 1017);
+
+    // Close 30: the release events (pointer up, key up, IME cancel) run on
+    // the next UI drain, not on the worker thread.
+    const int before = harness.client.body_events_;
+    harness.runtime.connection_closed(30);
+    CHECK(harness.client.body_events_ == before);   // nothing yet
+    harness.runtime.drain(harness.clock.now_value);
+    CHECK(harness.client.body_events_ > before);    // released now
+
+    // The pointer is free: connection 31 presses without releaseAll.
+    harness.runtime.receive(31, 204,
+        R"({"jsonrpc":"2.0","id":5,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":60,"y":300}})");
+    harness.runtime.drain(harness.clock.now_value);
+    CHECK(harness.result(204).is_object());
+}
+
+// A provider that switches document generations: strict clicks must follow
+// its resolve verdict and the merged layout revision, and a stale ref must
+// never silently click whatever object took its place (review finding: the
+// merged tree ignored provider revisions and re-enumerated numeric refs).
+class GenerationProvider final : public automation::ISemanticProvider {
+public:
+    std::uint64_t revision = 1;
+    int generation = 1;
+    int reject_resolves = 0;
+    tabengine::Rect bounds{20, 100, 200, 60};
+
+    void fill(automation::SemanticNode& node) const {
+        node.role = "button";
+        node.name = "Row";
+        node.stable_key = "app.row";
+        node.node = 77;
+        node.bounds = bounds;
+        node.clip = bounds;
+        node.actions = {"click"};
+    }
+
+    bool provide_semantic(tabengine::WindowId, automation::SemanticSnapshot& out) override {
+        out.revision = revision;
+        out.layout_revision = revision;
+        out.document_generation = static_cast<std::uint64_t>(generation);
+        automation::SemanticNode node;
+        fill(node);
+        out.nodes.push_back(node);
+        return true;
+    }
+
+    bool resolve_node(tabengine::WindowId, std::uint64_t node,
+                      automation::SemanticNode& resolved) override {
+        if (reject_resolves > 0 || node != 77) return false;
+        fill(resolved);
+        return true;
+    }
+};
+
+void test_provider_generation_and_strict_clicks() {
+    Harness harness;
+    GenerationProvider provider;
+    auto registration = harness.runtime.register_semantic_provider(&provider);
+    CHECK(registration.valid());
+
+    const auto click_json = [](const std::string& extra) {
+        return R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1",)" +
+               extra + R"(}})";
+    };
+    const std::string node_arg = R"("node":")" +
+        std::to_string((static_cast<std::uint64_t>(9) << 56) | 77) + R"(")";   // slot 9, node 77
+
+    // Snapshot pins the merged layout revision.
+    harness.call(300, R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+    const JsonValue snapshot1 = harness.result(300);
+    const std::int64_t pinned = snapshot1.find("layoutRevision")->as_integer();
+    bool saw_provider_node = false;
+    for (const JsonValue& node : snapshot1.find("nodes")->items()) {
+        if (node.find("stableKey") && node.find("stableKey")->as_string() == "app.row") {
+            saw_provider_node = true;
+            CHECK(node.find("node")->as_string() ==
+                  std::to_string((static_cast<std::uint64_t>(9) << 56) | 77));
+        }
+    }
+    CHECK(saw_provider_node);
+    CHECK(snapshot1.find("documentGeneration")->as_integer() == 1);
+
+    // Provider rejects the ref outright (DOM rebuilt): StaleNode, and zero
+    // input dispatched.
+    provider.reject_resolves = 1;
+    int before = harness.client.body_events_;
+    harness.call(301, click_json(node_arg + R"(,"snapshotId":)" + std::to_string(pinned) +
+                                 R"(,"strict":true)"));
+    CHECK(harness.error(301).find("code")->as_integer() == 1003);
+    CHECK(harness.client.body_events_ == before);
+    provider.reject_resolves = 0;
+
+    // Generation 2: same local ref means a different business object at a
+    // different position. The provider still resolves node 77, but the
+    // pinned merged revision moved: strict fails, non-strict clicks the
+    // CURRENT geometry.
+    provider.revision = 2;
+    provider.generation = 2;
+    provider.bounds = {330, 100, 200, 60};
+    harness.call(302, click_json(node_arg + R"(,"snapshotId":)" + std::to_string(pinned) +
+                                 R"(,"strict":true)"));
+    CHECK(harness.error(302).find("code")->as_integer() == 1003);
+    CHECK(harness.client.body_events_ == before);   // nothing dispatched
+
+    harness.call(303, click_json(node_arg));
+    const JsonValue clicked = harness.result(303);
+    CHECK(clicked.find("x")->as_integer() == 430);   // new bounds center
+    CHECK(clicked.find("y")->as_integer() == 130);
+    CHECK(harness.client.body_events_ > before);
+
+    // Strict stableKey: the pinned revision must cover provider changes.
+    harness.call(304, R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+    const std::int64_t pinned2 = harness.result(304).find("layoutRevision")->as_integer();
+    CHECK(pinned2 > pinned);   // provider change moved the merged revision
+    provider.revision = 3;
+    harness.call(305,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1","stableKey":"app.row","snapshotId":)" +
+                     std::to_string(pinned2) + R"(,"strict":true}})");
+    CHECK(harness.error(305).find("code")->as_integer() == 1003);
+    harness.call(306,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1","stableKey":"app.row"}})");
+    CHECK(harness.result(306).find("clicked")->as_integer() == 1);
+}
+
+// Provider slots are never reused: a ref minted for an unregistered
+// provider never addresses the provider that took its list position.
+void test_provider_slot_not_reused() {
+    class BoxProvider final : public automation::ISemanticProvider {
+    public:
+        std::string key;
+        tabengine::Rect bounds;
+        bool provide_semantic(tabengine::WindowId, automation::SemanticSnapshot& out) override {
+            out.revision = 1;
+            out.layout_revision = 1;
+            automation::SemanticNode node;
+            node.role = "button";
+            node.stable_key = key;
+            node.node = 5;
+            node.bounds = bounds;
+            node.clip = bounds;
+            out.nodes.push_back(node);
+            return true;
+        }
+        bool resolve_node(tabengine::WindowId, std::uint64_t node,
+                          automation::SemanticNode& resolved) override {
+            if (node != 5) return false;
+            resolved.role = "button";
+            resolved.stable_key = key;
+            resolved.node = 5;
+            resolved.bounds = bounds;
+            resolved.clip = bounds;
+            return true;
+        }
+    };
+
+    Harness harness;
+    BoxProvider first;
+    first.key = "first.row";
+    first.bounds = {50, 200, 100, 40};
+    {
+        auto registration = harness.runtime.register_semantic_provider(&first);
+        CHECK(registration.valid());
+        harness.call(310,
+                     R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+        const JsonValue snapshot = harness.result(310);
+        for (const JsonValue& node : snapshot.find("nodes")->items()) {
+            if (node.find("stableKey") && node.find("stableKey")->as_string() == "first.row") {
+                CHECK(node.find("node")->as_string() ==
+                      std::to_string((static_cast<std::uint64_t>(9) << 56) | 5));
+            }
+        }
+    }   // first provider unregisters here
+
+    BoxProvider second;
+    second.key = "second.row";
+    second.bounds = {400, 300, 100, 40};
+    {
+        auto registration = harness.runtime.register_semantic_provider(&second);
+        CHECK(registration.valid());
+        harness.call(311,
+                     R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+        const JsonValue snapshot = harness.result(311);
+        bool saw_second = false;
+        for (const JsonValue& node : snapshot.find("nodes")->items()) {
+            if (node.find("stableKey") && node.find("stableKey")->as_string() == "second.row") {
+                saw_second = true;
+                // New slot (10), not the recycled list index.
+                CHECK(node.find("node")->as_string() ==
+                      std::to_string((static_cast<std::uint64_t>(10) << 56) | 5));
+            }
+        }
+        CHECK(saw_second);
+    }
+
+    // The old ref (slot 9) is dead: no click, no resolve, and the new
+    // provider's node 5 at the same local id is NOT a substitute.
+    const std::string old_ref = std::to_string((static_cast<std::uint64_t>(9) << 56) | 5);
+    const int before = harness.client.body_events_;
+    harness.call(312,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1","node":")" +
+                     old_ref + R"("}})");
+    CHECK(harness.error(312).find("code")->as_integer() == 1003);
+    CHECK(harness.client.body_events_ == before);
+    harness.call(313,
+                 R"({"jsonrpc":"2.0","id":1,"method":"UI.resolveNode","params":{"windowId":"1","node":")" +
+                     old_ref + R"("}})");
+    CHECK(harness.error(313).find("code")->as_integer() == 1003);
+}
+
+// Clicks land inside the visible clip, and fully clipped nodes refuse.
+void test_clip_aware_click_point() {
+    class ClippedProvider final : public automation::ISemanticProvider {
+    public:
+        tabengine::Rect bounds{0, 400, 900, 100};
+        tabengine::Rect clip{0, 400, 100, 100};
+        bool fully_clipped = false;
+        bool provide_semantic(tabengine::WindowId, automation::SemanticSnapshot& out) override {
+            automation::SemanticNode node;
+            node.role = "pane";
+            node.stable_key = "app.clipped";
+            node.node = 1;
+            node.bounds = bounds;
+            node.clip = fully_clipped ? tabengine::Rect{} : clip;
+            out.nodes.push_back(node);
+            return true;
+        }
+        bool resolve_node(tabengine::WindowId, std::uint64_t node,
+                          automation::SemanticNode& resolved) override {
+            if (node != 1) return false;
+            resolved = out_node();
+            return true;
+        }
+        automation::SemanticNode out_node() const {
+            automation::SemanticNode node;
+            node.role = "pane";
+            node.stable_key = "app.clipped";
+            node.node = 1;
+            node.bounds = bounds;
+            node.clip = fully_clipped ? tabengine::Rect{} : clip;
+            return node;
+        }
+    };
+
+    Harness harness;
+    ClippedProvider provider;
+    auto registration = harness.runtime.register_semantic_provider(&provider);
+    CHECK(registration.valid());
+
+    harness.call(320,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1","stableKey":"app.clipped"}})");
+    const JsonValue clicked = harness.result(320);
+    const std::int64_t x = clicked.find("x")->as_integer();
+    CHECK(x >= 0 && x < 100);   // inside the visible 100px strip, not 450
+
+    provider.fully_clipped = true;
+    harness.call(321,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1","stableKey":"app.clipped"}})");
+    CHECK(harness.error(321).find("code")->as_integer() == 1004);   // NotInteractable
+}
+
+// Destroying the bridge revokes its wait hooks: pending dependent waits
+// fail with Unsupported instead of calling into freed memory.
+void test_hooks_revoked_on_bridge_destruction() {
+    Clock clock;
+    FakePlatform platform;
+    FakeRenderer renderer;
+    CountingClient client;
+    tabengine::Shell shell{platform, renderer, client};
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0", "detach-test"}, std::ref(clock)};
+
+    std::map<std::uint64_t, std::string> responses;
+    runtime.set_response_sink(
+        [&](std::uint64_t, std::uint64_t request, std::string payload) {
+            responses.emplace(request, std::move(payload));
+        });
+    const tabengine::WindowId window = shell.open_window({10, 20, 900, 600});
+    CHECK(window != 0);
+
+    {
+        ShellAutomationBridge bridge{{shell, platform, renderer, runtime}};
+        runtime.receive(7, 400,
+                        R"({"jsonrpc":"2.0","id":1,"method":"Wait.condition","params":{"condition":"nodeAppears","windowId":"1","stableKey":"never.appears"}})");
+        runtime.drain(clock.now_value);
+        CHECK(responses.count(400) == 0);   // pending on the bridge hooks
+    }   // bridge destroyed
+
+    clock.now_value += 0.05;
+    runtime.drain(clock.now_value);
+    CHECK(responses.count(400) == 1);
+    JsonValue parsed;
+    CHECK(automation::parse_json_strict(responses[400], 65536, parsed).status ==
+          automation::JsonParseStatus::Ok);
+    CHECK(parsed.find("error")->find("code")->as_integer() == 1000);   // Unsupported
+
+    // The runtime keeps serving (no hooks) without touching the dead bridge.
+    runtime.receive(7, 401, R"({"jsonrpc":"2.0","id":2,"method":"System.getInfo"})");
+    runtime.drain(clock.now_value);
+    CHECK(responses.count(401) == 1);
+}
+
+// Real HTTP against a real bridge: raw input over a logical session holds
+// across requests; without one, each request's leftovers release right
+// after its response (the review's SessionConflict repro).
+void test_http_input_sessions_end_to_end() {
+    Clock clock;
+    FakePlatform platform;
+    FakeRenderer renderer;
+    CountingClient client;
+    tabengine::Shell shell{platform, renderer, client};
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0", "http-bridge"}, std::ref(clock)};
+    ShellAutomationBridge bridge{{shell, platform, renderer, runtime}};
+    automation::TransportConfig config;
+    config.token = "0123456789abcdef0123456789abcdef";
+    config.response_timeout_s = 2.0;
+    automation::AutomationTransport transport{runtime, config};
+    CHECK(transport.start());
+    const tabengine::WindowId window = shell.open_window({10, 20, 900, 600});
+    CHECK(window != 0);
+
+    struct HttpReply {
+        int status = 0;
+        std::string body;
+        bool rpc_error = false;
+        std::int64_t error_code = 0;
+    };
+    const auto rpc = [&](const std::string& body, const std::string& session = {}) {
+        HttpReply reply;
+        std::atomic<bool> done{false};
+        std::thread request_thread([&] {
+            SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_port = htons(transport.port());
+            inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+            CHECK(connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+            std::string request = "POST /automation/v1/rpc HTTP/1.1\r\n";
+            request += "Host: 127.0.0.1\r\n";
+            request += "Content-Type: application/json\r\n";
+            request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+            request += "Authorization: Bearer " + config.token + "\r\n";
+            if (!session.empty()) request += "X-TabEngine-Session: " + session + "\r\n";
+            request += "\r\n";
+            request += body;
+            CHECK(send(socket, request.data(), static_cast<int>(request.size()), 0) ==
+                  static_cast<int>(request.size()));
+            char buffer[4096];
+            std::string raw;
+            while (true) {
+                const int got = recv(socket, buffer, sizeof(buffer), 0);
+                if (got <= 0) break;
+                raw.append(buffer, static_cast<std::size_t>(got));
+            }
+            closesocket(socket);
+            const std::size_t line_end = raw.find("\r\n");
+            if (line_end != std::string::npos) {
+                reply.status = std::atoi(raw.substr(9, 3).c_str());
+            }
+            const std::size_t body_start = raw.find("\r\n\r\n");
+            if (body_start != std::string::npos) reply.body = raw.substr(body_start + 4);
+            done.store(true);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!done.load()) {
+            runtime.drain(clock.now_value);
+            clock.now_value += 0.001;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            CHECK(std::chrono::steady_clock::now() < deadline);
+        }
+        request_thread.join();
+        JsonValue parsed;
+        if (reply.status == 200 &&
+            automation::parse_json_strict(reply.body, 65536, parsed).status ==
+                automation::JsonParseStatus::Ok) {
+            if (const JsonValue* error = parsed.find("error")) {
+                reply.rpc_error = true;
+                reply.error_code = error->find("code")->as_integer();
+            }
+        }
+        return reply;
+    };
+    const auto session_begin = [&] {
+        std::string id;
+        std::atomic<bool> done{false};
+        std::thread request_thread([&] {
+            SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_port = htons(transport.port());
+            inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+            CHECK(connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+            const std::string request =
+                "POST /automation/v1/session HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Authorization: Bearer " +
+                config.token + "\r\n\r\n";
+            CHECK(send(socket, request.data(), static_cast<int>(request.size()), 0) ==
+                  static_cast<int>(request.size()));
+            char buffer[1024];
+            std::string raw;
+            while (true) {
+                const int got = recv(socket, buffer, sizeof(buffer), 0);
+                if (got <= 0) break;
+                raw.append(buffer, static_cast<std::size_t>(got));
+            }
+            closesocket(socket);
+            const std::size_t body_start = raw.find("\r\n\r\n");
+            JsonValue parsed;
+            if (body_start != std::string::npos &&
+                automation::parse_json_strict(raw.substr(body_start + 4), 65536, parsed)
+                    .status == automation::JsonParseStatus::Ok) {
+                if (const JsonValue* value = parsed.find("sessionId")) id = value->as_string();
+            }
+            done.store(true);
+        });
+        while (!done.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        request_thread.join();
+        return id;
+    };
+
+    // Review repro: a raw pointer down on an ephemeral request used to
+    // leave the button stuck; the next client met SessionConflict. Now the
+    // ephemeral connection closes right after the response and releases.
+    const HttpReply down = rpc(
+        R"({"jsonrpc":"2.0","id":1,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":40,"y":300}})");
+    CHECK(down.status == 200);
+    CHECK(!down.rpc_error);
+    const HttpReply click_after = rpc(
+        R"({"jsonrpc":"2.0","id":2,"method":"Input.click","params":{"windowId":"1","x":40,"y":300}})");
+    CHECK(click_after.status == 200);
+    CHECK(!click_after.rpc_error);   // no SessionConflict
+
+    // Session: down -> move -> up across three requests, one identity.
+    const std::string session = session_begin();
+    CHECK(session.size() >= 32);
+    const HttpReply s_down = rpc(
+        R"({"jsonrpc":"2.0","id":3,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":40,"y":300}})",
+        session);
+    CHECK(s_down.status == 200 && !s_down.rpc_error);
+    const HttpReply s_move = rpc(
+        R"({"jsonrpc":"2.0","id":4,"method":"Input.pointer","params":{"windowId":"1","kind":"move","x":80,"y":320}})",
+        session);
+    CHECK(s_move.status == 200 && !s_move.rpc_error);
+    const HttpReply s_up = rpc(
+        R"({"jsonrpc":"2.0","id":5,"method":"Input.pointer","params":{"windowId":"1","kind":"up","x":80,"y":320}})",
+        session);
+    CHECK(s_up.status == 200 && !s_up.rpc_error);
+
+    // Hold a key over the session; ending the session releases it on the
+    // UI thread (KeyUp reaches the body).
+    const HttpReply key_down = rpc(
+        R"({"jsonrpc":"2.0","id":6,"method":"Input.key","params":{"windowId":"1","key":"z","kind":"down"}})",
+        session);
+    CHECK(key_down.status == 200 && !key_down.rpc_error);
+    const int before_release = client.body_events_;
+    {
+        std::atomic<bool> done{false};
+        std::thread request_thread([&] {
+            SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_port = htons(transport.port());
+            inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+            CHECK(connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+            const std::string request =
+                "DELETE /automation/v1/session HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Authorization: Bearer " +
+                config.token + "\r\nX-TabEngine-Session: " + session + "\r\n\r\n";
+            CHECK(send(socket, request.data(), static_cast<int>(request.size()), 0) ==
+                  static_cast<int>(request.size()));
+            char buffer[1024];
+            while (recv(socket, buffer, sizeof(buffer), 0) > 0) {
+            }
+            closesocket(socket);
+            done.store(true);
+        });
+        while (!done.load()) {
+            runtime.drain(clock.now_value);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        request_thread.join();
+    }
+    clock.now_value += 0.01;
+    runtime.drain(clock.now_value);
+    CHECK(client.body_events_ > before_release);   // KeyUp delivered
+
+    // The session id is gone: further requests with it fail cleanly.
+    const HttpReply after_end = rpc(
+        R"({"jsonrpc":"2.0","id":7,"method":"System.getInfo"})", session);
+    CHECK(after_end.status == 404);
+
+    transport.stop();
+}
+
 } // namespace
 
 int main() {
@@ -630,5 +1159,11 @@ int main() {
     test_environment_hooks_and_events();
     test_system_capabilities();
     test_capture_artifact_and_trace();
+    test_input_release_on_connection_closed();
+    test_provider_generation_and_strict_clicks();
+    test_provider_slot_not_reused();
+    test_clip_aware_click_point();
+    test_hooks_revoked_on_bridge_destruction();
+    test_http_input_sessions_end_to_end();
     return 0;
 }

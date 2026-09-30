@@ -251,11 +251,56 @@ bool decode_utf8(std::string_view text, std::vector<char32_t>& out) {
 
 } // namespace
 
+void ShellAutomationBridge::Impl::release_session_input(InputSession& session) {
+    if (session.pointer_window && session.held_buttons != 0 &&
+        shell.model().window(session.pointer_window)) {
+        // Every held button gets its own up at the last position; a window
+        // that died meanwhile simply forgets the hold.
+        for (const unsigned bit :
+             {kPointerButtonLeft, kPointerButtonRight, kPointerButtonMiddle}) {
+            if (!(session.held_buttons & bit)) continue;
+            Event up;
+            up.type = EventType::PointerUp;
+            up.window = session.pointer_window;
+            up.client = session.last_client;
+            up.screen = client_to_screen(session.pointer_window, session.last_client);
+            up.button = bit == kPointerButtonLeft ? PointerButton::Left
+                        : bit == kPointerButtonRight ? PointerButton::Right
+                                                     : PointerButton::Middle;
+            shell.on_event(up);
+        }
+    }
+    if (session.keyboard_window && shell.model().window(session.keyboard_window)) {
+        for (const int vk : session.held_keys) {
+            Event up;
+            up.type = EventType::KeyUp;
+            up.key = vk;
+            up.window = session.keyboard_window;
+            shell.on_event(up);
+        }
+        if (session.ime_open) {
+            Event cancel;
+            cancel.type = EventType::ImeCancel;
+            cancel.window = session.keyboard_window;
+            shell.on_event(cancel);
+        }
+    }
+    session = InputSession{};
+}
+
+void ShellAutomationBridge::Impl::release_input_session(std::uint64_t connection) {
+    const auto it = sessions.find(connection);
+    if (it == sessions.end()) return;
+    InputSession session = std::move(it->second);
+    sessions.erase(it);
+    release_session_input(session);
+}
+
 void ShellAutomationBridge::Impl::register_input_domain() {
     const std::string input{std::string(kGrantInput)};
 
     std::vector<MethodDescriptor> methods;
-    methods.push_back(descriptor("Input.click", "Synthesize a full click at a client position, or at a semantic node resolved from the current tree (node or stableKey). count=2 emits a double click whose second press carries clickCount 2. With snapshotId and strict the click fails when the layout revision changed since the snapshot.", true,
+    methods.push_back(descriptor("Input.click", "Synthesize a full click at a client position, or at a semantic node resolved through its authoritative owner (node ref or stableKey). Node clicks land inside the visible clip. With snapshotId and strict the click fails when the merged layout revision (shell plus providers) changed since the snapshot - for both node and stableKey mode. count=2 emits a double click whose second press carries clickCount 2.", true,
         object_schema({
             {"windowId", string_property("Target window (decimal id string)")},
             {"x", integer_property("Client x in pixels")},
@@ -263,7 +308,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             {"node", string_property("Node ref from UI.snapshot (decimal string)")},
             {"stableKey", string_property("Business identity instead of x/y or node")},
             {"snapshotId", integer_property("Snapshot layoutRevision for strict clicks", 0)},
-            {"strict", boolean_property("Fail when layoutRevision moved (default false)")},
+            {"strict", boolean_property("Fail when the merged layoutRevision moved (default false)")},
             {"button", enum_property("Pointer button", {"left", "right", "middle"})},
             {"count", integer_property("Click count (1 or 2)", 1, 2)},
         },
@@ -328,33 +373,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
         InputSession& session = sessions[context.connection];
 
         if (context.method == "Input.releaseAll") {
-            if (session.pointer_window && session.held_buttons != 0) {
-                const PointerButton button =
-                    session.held_buttons & kPointerButtonLeft ? PointerButton::Left
-                    : session.held_buttons & kPointerButtonRight ? PointerButton::Right
-                                                                 : PointerButton::Middle;
-                Event up;
-                up.type = EventType::PointerUp;
-                up.window = session.pointer_window;
-                up.client = session.last_client;
-                up.screen = client_to_screen(session.pointer_window, session.last_client);
-                up.button = button;
-                shell.on_event(up);
-            }
-            for (const int vk : session.held_keys) {
-                Event up;
-                up.type = EventType::KeyUp;
-                up.key = vk;
-                up.window = session.keyboard_window;
-                shell.on_event(up);
-            }
-            if (session.ime_open) {
-                Event cancel;
-                cancel.type = EventType::ImeCancel;
-                cancel.window = session.keyboard_window;
-                shell.on_event(cancel);
-            }
-            session = InputSession{};
+            release_session_input(session);
             sink(MethodOutcome::success(JsonValue::object()));
             return;
         }
@@ -396,11 +415,14 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                     return;
                 }
             }
-            // Node mode: resolve a semantic node and click its current hit
-            // position. A snapshot id may pin the layout revision; without
-            // `strict` the click recomputes geometry for animation movement.
+            // Node/stableKey mode: resolve through the authoritative owner
+            // (engine kinds or the issuing provider's resolve_node), so a
+            // ref from a dead generation never silently matches a
+            // replacement object. A snapshot id may pin the merged layout
+            // revision (strict); without `strict` the click recomputes
+            // geometry for animation movement. The click lands inside the
+            // visible clip, never at a covered coordinate.
             Point point;
-            bool has_point = false;
             const JsonValue* node_value = context.params.find("node");
             const JsonValue* key_value = context.params.find("stableKey");
             if (node_value && node_value->is_string()) {
@@ -410,68 +432,48 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                         Error::invalid_params("params.node: not a decimal id string")));
                     return;
                 }
-                bool truncated = false;
-                const SemanticSnapshot snapshot =
-                    build_snapshot(window, kMaxSnapshotNodes, truncated);
-                const auto it = std::find_if(
-                    snapshot.nodes.begin(), snapshot.nodes.end(),
-                    [&](const SemanticNode& candidate) { return candidate.node == node; });
-                if (it == snapshot.nodes.end()) {
+                SemanticNode target;
+                if (!resolve_node_ref(window, node, target)) {
                     sink(MethodOutcome::failure(Error::stale_node(
                         "node " + node_value->as_string() + " is not in the current tree")));
                     return;
                 }
-                if (!it->enabled || !it->visible || it->clip.width <= 0 ||
-                    it->clip.height <= 0) {
+                if (strict_snapshot_mismatch(window, context.params)) {
+                    sink(MethodOutcome::failure(
+                        Error::stale_node("layout changed since the snapshot was taken")));
+                    return;
+                }
+                if (!target.enabled || !target.visible || target.clip.width <= 0 ||
+                    target.clip.height <= 0) {
                     sink(MethodOutcome::failure(Error::make(
                         ErrorCode::NotInteractable,
                         "node " + node_value->as_string() + " is not interactable now")));
                     return;
                 }
-                if (const JsonValue* snapshot_value = context.params.find("snapshotId");
-                    snapshot_value && snapshot_value->is_integer()) {
-                    const bool strict =
-                        context.params.find("strict") &&
-                        context.params.find("strict")->is_boolean() &&
-                        context.params.find("strict")->as_boolean();
-                    if (strict &&
-                        snapshot_value->as_integer() !=
-                            static_cast<std::int64_t>(snapshot.layout_revision)) {
-                        sink(MethodOutcome::failure(Error::stale_node(
-                            "layout changed since the snapshot was taken")));
-                        return;
-                    }
-                }
-                point = {it->bounds.x + it->bounds.width / 2,
-                         it->bounds.y + it->bounds.height / 2};
-                has_point = true;
+                point = interactable_point(target);
             } else if (key_value && key_value->is_string()) {
-                bool truncated = false;
-                const SemanticSnapshot snapshot =
-                    build_snapshot(window, kMaxSnapshotNodes, truncated);
-                const auto it = std::find_if(
-                    snapshot.nodes.begin(), snapshot.nodes.end(),
-                    [&](const SemanticNode& candidate) {
-                        return candidate.stable_key == key_value->as_string();
-                    });
-                if (it == snapshot.nodes.end()) {
+                SemanticNode target;
+                if (!resolve_stable_key(window, key_value->as_string(), target)) {
                     sink(MethodOutcome::failure(Error::stale_node(
                         "no node with stableKey '" + key_value->as_string() + "'")));
                     return;
                 }
-                if (!it->enabled || !it->visible || it->clip.width <= 0 || it->clip.height <= 0) {
+                if (strict_snapshot_mismatch(window, context.params)) {
+                    sink(MethodOutcome::failure(
+                        Error::stale_node("layout changed since the snapshot was taken")));
+                    return;
+                }
+                if (!target.enabled || !target.visible || target.clip.width <= 0 ||
+                    target.clip.height <= 0) {
                     sink(MethodOutcome::failure(Error::make(
                         ErrorCode::NotInteractable,
                         "node '" + key_value->as_string() + "' is not interactable now")));
                     return;
                 }
-                point = {it->bounds.x + it->bounds.width / 2,
-                         it->bounds.y + it->bounds.height / 2};
-                has_point = true;
+                point = interactable_point(target);
             } else if (!wire_xy(context.params, point, sink)) {
                 return;
             }
-            (void)has_point;
             for (std::int64_t i = 1; i <= count; ++i) {
                 Event down;
                 down.type = EventType::PointerDown;
