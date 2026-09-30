@@ -254,6 +254,50 @@ public:
         }
     }
 
+    bool set_client_bounds(WindowId id, Rect screen_bounds) override {
+        HWND hwnd = handle(id);
+        if (!hwnd || screen_bounds.width <= 0 || screen_bounds.height <= 0) return false;
+        // Convert the desired client rectangle to a window rectangle with
+        // the current frame geometry; the custom frame keeps the margins
+        // but WM_NCCALCSIZE already excludes them, so the window rect and
+        // client rect differ only by the visible frame this style draws.
+        RECT desired{screen_bounds.x, screen_bounds.y,
+                     screen_bounds.x + screen_bounds.width,
+                     screen_bounds.y + screen_bounds.height};
+        const LONG style = static_cast<LONG>(GetWindowLongW(hwnd, GWL_STYLE));
+        const LONG ex_style = static_cast<LONG>(GetWindowLongW(hwnd, GWL_EXSTYLE));
+        if (!AdjustWindowRectExForDpi(&desired, style, FALSE, ex_style,
+                                      GetDpiForWindow(hwnd)))
+            return false;
+        return SetWindowPos(hwnd, nullptr, desired.left, desired.top,
+                            desired.right - desired.left, desired.bottom - desired.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+    }
+
+    void activate(WindowId id) override {
+        HWND hwnd = handle(id);
+        if (!hwnd) return;
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+    }
+
+    bool begin_move_session(WindowId id) override {
+        auto it = windows_.find(id);
+        if (it == windows_.end() || it->second->in_move_loop) return false;
+        it->second->stepwise_move = true;
+        return true;
+    }
+
+    void end_move_session(WindowId id, MoveLoopResult result) override {
+        auto it = windows_.find(id);
+        if (it == windows_.end() || !it->second->stepwise_move) return;
+        it->second->stepwise_move = false;
+        Event ended;
+        ended.type = EventType::MoveEnded;
+        ended.move_result = result;
+        emit(*it->second, ended);
+    }
+
     MoveLoopResult run_native_move_loop(WindowId id) override {
         auto it = windows_.find(id);
         if (it == windows_.end() || it->second->in_move_loop) return MoveLoopResult::Unsupported;
@@ -296,7 +340,15 @@ public:
 
     void end_native_move_loop(WindowId id) override {
         auto it = windows_.find(id);
-        if (it != windows_.end() && it->second->in_move_loop) {
+        if (it == windows_.end()) return;
+        // A stepwise session has no OS loop to cancel: end it directly and
+        // report the attach-probe outcome as a canceled move (the shell
+        // honors a pending target even when the result is Canceled).
+        if (it->second->stepwise_move) {
+            end_move_session(id, MoveLoopResult::Canceled);
+            return;
+        }
+        if (it->second->in_move_loop) {
             it->second->move_loop_canceled = true;
             SendMessageW(it->second->hwnd, WM_CANCELMODE, 0, 0);
         }
@@ -327,6 +379,7 @@ private:
         bool move_loop_mouse_up = false;
         bool move_loop_exited = false;
         bool skip_first_moving = false;
+        bool stepwise_move = false;
         bool tracking_mouse = false;
         bool frame_pending = false;
     };
@@ -501,6 +554,19 @@ private:
             pointer.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             pointer.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             pointer.button = button;
+            if (message == WM_LBUTTONDBLCLK || message == WM_RBUTTONDBLCLK ||
+                message == WM_MBUTTONDBLCLK) {
+                pointer.click_count = 2;
+            }
+            if (!is_press) {
+                // The complete held-button set for moves and releases; the
+                // released button is already excluded by the system.
+                unsigned held = 0;
+                if (wp & MK_LBUTTON) held |= kPointerButtonLeft;
+                if (wp & MK_RBUTTON) held |= kPointerButtonRight;
+                if (wp & MK_MBUTTON) held |= kPointerButtonMiddle;
+                pointer.buttons = held;
+            }
             self.emit(*native, pointer);
             return 0;
         }
@@ -511,15 +577,16 @@ private:
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL: {
             // The wheel is delivered to the focused window with screen
-            // coordinates; the body needs the client point.
+            // coordinates; the body needs the client point. Horizontal
+            // wheels carry their delta in wheel_x; vertical in wheel.
             POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &screen);
-            if (message == WM_MOUSEHWHEEL) return 0; // horizontal wheels: none yet
             Event wheel;
             wheel.type = EventType::PointerWheel;
             wheel.client = {screen.x, screen.y};
             wheel.screen = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            wheel.wheel = GET_WHEEL_DELTA_WPARAM(wp);
+            wheel.wheel = message == WM_MOUSEWHEEL ? GET_WHEEL_DELTA_WPARAM(wp) : 0;
+            wheel.wheel_x = message == WM_MOUSEHWHEEL ? GET_WHEEL_DELTA_WPARAM(wp) : 0;
             self.emit(*native, wheel);
             return 0;
         }
@@ -534,15 +601,33 @@ private:
                 break; // let the system leave its modal move loop
             }
             const bool alt_held = (GetKeyState(VK_MENU) & 0x8000) != 0;
-            self.emit(*native, {EventType::KeyDown, native->id, {}, {}, {},
-                                static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0,
-                                (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt_held});
+            Event key;
+            key.type = EventType::KeyDown;
+            key.key = static_cast<int>(wp);
+            key.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            key.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            key.alt = alt_held;
+            key.repeat = (lp & (1 << 30)) != 0;   // previous key-down bit
+            self.emit(*native, key);
             // Alt+F4 (close) and Alt+Space (system menu) stay with the system;
             // every other Alt combo (browser-style Back/Forward) is app input.
             if (message == WM_SYSKEYDOWN) {
                 if (wp != VK_F4 && wp != VK_SPACE) return 0;
                 break;
             }
+            return 0;
+        }
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            // Releases complete the key contract for clients that track
+            // held keys; the engine binds nothing to them.
+            Event key;
+            key.type = EventType::KeyUp;
+            key.key = static_cast<int>(wp);
+            key.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            key.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            key.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            self.emit(*native, key);
             return 0;
         }
         case WM_CHAR: {

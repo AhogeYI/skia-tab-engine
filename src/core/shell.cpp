@@ -228,6 +228,7 @@ WindowId Shell::open_window(Rect bounds, bool with_initial_tab, bool visible) {
     if (!model_.window(id)) return 0;
     if (visible) platform_.show(id);
     platform_.invalidate(id);
+    notify([&](ShellObserver& observer) { observer.window_opened(id); });
     return id;
 }
 
@@ -245,6 +246,9 @@ TabId Shell::new_tab(WindowId window) {
         if (previous != id) client_.active_tab_changed(window, previous, id);
         sync_visuals(window, id);
         platform_.invalidate(window);
+        notify([&](ShellObserver& observer) {
+            observer.tab_added(window, id, created.content);
+        });
     } else {
         client_.tab_closed(created.content);
     }
@@ -252,8 +256,7 @@ TabId Shell::new_tab(WindowId window) {
     return id;
 }
 
-bool Shell::close_tab(WindowId window, TabId tab) {
-    const WindowTabs* w = model_.window(window);
+bool Shell::close_tab(WindowId window, TabId tab) {    const WindowTabs* w = model_.window(window);
     if (!w || !busy_windows_.insert(window).second) return false;
     const auto it = std::find_if(w->tabs.begin(), w->tabs.end(),
                                  [tab](const Tab& item) { return item.id == tab; });
@@ -321,6 +324,7 @@ bool Shell::select_tab(WindowId window, TabId tab) {
     if (previous != tab) client_.active_tab_changed(window, previous, tab);
     platform_.invalidate(window);
     busy_windows_.erase(window);
+    notify([&](ShellObserver& observer) { observer.tab_selected(window, tab); });
     return true;
 }
 
@@ -334,6 +338,7 @@ bool Shell::move_tab(WindowId window, TabId tab, std::size_t index) {
     if (!model_.move_tab(window, tab, index)) return false;
     sync_visuals(window);
     platform_.invalidate(window);
+    notify([&](ShellObserver& observer) { observer.tab_moved(window, tab, index); });
     return true;
 }
 
@@ -361,6 +366,7 @@ bool Shell::transfer_tab(WindowId from, WindowId to, TabId tab, std::size_t inde
     }
     client_.tab_detached(from, tab, content);
     client_.tab_attached(to, tab, content);
+    notify([&](ShellObserver& observer) { observer.tab_transferred(from, to, tab, index); });
     const TabId source_current = model_.window(from)->active;
     if (source_active != source_current)
         client_.active_tab_changed(from, source_active, source_current);
@@ -387,6 +393,7 @@ bool Shell::update_tab(WindowId window, TabId tab, std::string title,
                        bool loading, bool attention) {
     if (!model_.update_tab(window, tab, std::move(title), loading, attention)) return false;
     platform_.invalidate(window);
+    notify([&](ShellObserver& observer) { observer.tab_updated(window, tab); });
     return true;
 }
 
@@ -422,6 +429,9 @@ void Shell::destroy_window_contents(WindowId window) {
     for (const Tab& tab : tabs) {
         client_.tab_detached(window, tab.id, tab.content);
         client_.tab_closed(tab.content);
+        notify([&](ShellObserver& observer) {
+            observer.tab_closed(window, tab.id, tab.content);
+        });
     }
     request_destroy(window);
 }
@@ -429,8 +439,17 @@ void Shell::destroy_window_contents(WindowId window) {
 void Shell::request_destroy(WindowId window) {
     if (!model_.remove_window(window)) return;
     visuals_.erase(window);
+    frame_serials_.erase(window);
     pending_destroy_.push_back(window);
-    if (dispatch_depth_ == 0) flush_destroy();
+    if (dispatch_depth_ == 0) {
+        flush_destroy();
+        notify([&](ShellObserver& observer) { observer.window_closed(window); });
+    } else {
+        // Deferred teardown: notify once the window is really destroyed.
+        // The outermost dispatch flush calls this lambda-less path via
+        // flush_destroy's caller; notify there instead.
+        notify_deferred_closed_.push_back(window);
+    }
 }
 
 void Shell::flush_destroy() {
@@ -439,6 +458,13 @@ void Shell::flush_destroy() {
     for (WindowId id : pending) {
         renderer_.detach(id);
         platform_.destroy(id);
+    }
+    if (!notify_deferred_closed_.empty()) {
+        auto deferred = std::move(notify_deferred_closed_);
+        notify_deferred_closed_.clear();
+        for (WindowId id : deferred) {
+            notify([&](ShellObserver& observer) { observer.window_closed(id); });
+        }
     }
 }
 
@@ -450,6 +476,7 @@ void Shell::on_event(const Event& event) {
 }
 
 void Shell::handle_event(const Event& event) {
+    notify([&](ShellObserver& observer) { observer.shell_event(event); });
     if (!model_.window(event.window)) return;
     switch (event.type) {
     case EventType::Paint: paint(event.window); break;
@@ -485,6 +512,7 @@ void Shell::handle_event(const Event& event) {
         break;
     case EventType::WindowActivated:
         client_.window_activation_changed(event.window, true);
+        notify([&](ShellObserver& observer) { observer.activation_changed(event.window, true); });
         break;
     case EventType::WindowDeactivated:
         if (drag_.window == event.window && drag_.phase != DragPhase::NativeWindow) {
@@ -492,6 +520,7 @@ void Shell::handle_event(const Event& event) {
         }
         clear_hover(event.window);
         client_.window_activation_changed(event.window, false);
+        notify([&](ShellObserver& observer) { observer.activation_changed(event.window, false); });
         break;
     case EventType::PlacementChanged: {
         const Point origin = platform_.client_origin(event.window);
@@ -509,6 +538,11 @@ void Shell::handle_event(const Event& event) {
         handle_pointer(event);
         break;
     case EventType::Moving: handle_moving(event); break;
+    case EventType::MoveEnded:
+        // Stepwise move session completion; finish_native_drag ignores
+        // calls outside the NativeWindow phase.
+        finish_native_drag(event.move_result);
+        break;
     case EventType::AnimationFrame: advance_animations(event.window); break;
     case EventType::TextInput:
     case EventType::ImeStart:
@@ -895,6 +929,7 @@ void Shell::finish_close_tab(WindowId window, TabId tab) {
     (void)model_.close_tab(window, tab);
     client_.tab_detached(window, tab, content);
     client_.tab_closed(content);
+    notify([&](ShellObserver& observer) { observer.tab_closed(window, tab, content); });
     if (auto visual = visuals_.find(window); visual != visuals_.end())
         visual->second.tabs.erase(tab);
     sync_visuals(window);
@@ -940,6 +975,9 @@ void Shell::advance_animations(WindowId window) {
     if (!card.showing && !card.opacity.active(now) && card.opacity.at(now) <= 0.0f)
         card.displayed = 0;
     platform_.invalidate(window);
+    if (!has_active_animations(window)) {
+        notify([&](ShellObserver& observer) { observer.animations_settled(window); });
+    }
     schedule_animation(window);
 }
 
@@ -1187,7 +1225,12 @@ void Shell::handle_pointer(const Event& event) {
         if (drag_.phase != DragPhase::NativeWindow) {
             drag_ = {};
             platform_.release_pointer();
-            if (was_dragging) settle_drag(completed);
+            if (was_dragging) {
+                settle_drag(completed);
+                notify([&](ShellObserver& observer) {
+                    observer.drag_finished(completed.window, completed.tab);
+                });
+            }
         }
         return;
     }
@@ -1210,6 +1253,9 @@ void Shell::handle_pointer(const Event& event) {
     if (drag_.phase == DragPhase::Pressed && dx * dx + dy * dy > slop * slop) {
         drag_.phase = DragPhase::InStrip;
         clear_hover(event.window);
+        notify([&](ShellObserver& observer) {
+            observer.drag_started(event.window, drag_.tab);
+        });
     }
     if (drag_.phase != DragPhase::InStrip) return;
     drag_.current_screen = event.screen;
@@ -1268,6 +1314,11 @@ void Shell::start_native_drag(WindowId window, Point screen) {
                                 {screen.x - drag_.grab_client.x,
                                  screen.y - drag_.grab_client.y});
     platform_.release_pointer();
+    // A stepwise session keeps the UI thread free: logic-driven moves
+    // arrive as Moving events and the session ends through
+    // end_move_session/end_native_move_loop, reporting MoveEnded. The
+    // native loop below is the real-mouse path and blocks by design.
+    if (platform_.begin_move_session(drag_.window)) return;
     // The first frame must be visible before the synchronous OS move loop.
     paint(drag_.window);
     const MoveLoopResult result = platform_.run_native_move_loop(drag_.window);
@@ -1310,6 +1361,9 @@ void Shell::finish_native_drag(MoveLoopResult result) {
                            completed.original_index);
     }
     drag_ = {};
+    notify([&](ShellObserver& observer) {
+        observer.drag_finished(completed.window, completed.tab);
+    });
 }
 
 void Shell::cancel_drag() {
@@ -1327,6 +1381,11 @@ void Shell::cancel_drag() {
         settle_drag(canceled);
     }
     platform_.release_pointer();
+    if (canceled.phase != DragPhase::Idle) {
+        notify([&](ShellObserver& observer) {
+            observer.drag_finished(canceled.window, canceled.tab);
+        });
+    }
 }
 
 void Shell::paint(WindowId window) {
@@ -1482,6 +1541,38 @@ void Shell::paint(WindowId window) {
     canvas->restore();
     paint_hover_card(window, *canvas);
     renderer_.present(window, platform_.native_handle(window));
+    const std::uint64_t serial = frame_serials_[window] + 1;
+    frame_serials_[window] = serial;
+    notify([&](ShellObserver& observer) { observer.frame_presented(window, serial); });
+}
+
+void Shell::add_observer(ShellObserver* observer) {
+    if (observer) observers_.push_back(observer);
+}
+
+void Shell::remove_observer(ShellObserver* observer) {
+    std::erase(observers_, observer);
+}
+
+std::uint64_t Shell::frame_serial(WindowId window) const {
+    const auto it = frame_serials_.find(window);
+    return it == frame_serials_.end() ? 0 : it->second;
+}
+
+bool Shell::has_active_animations(WindowId window) const {
+    const WindowTabs* w = model_.window(window);
+    if (!w) return false;
+    const double now = platform_.monotonic_seconds();
+    const auto visual = visuals_.find(window);
+    if (visual == visuals_.end()) return false;
+    for (const auto& [tab, state] : visual->second.tabs) {
+        (void)tab;
+        if (state.bounds.active(now) || state.hover.active(now)) return true;
+    }
+    const auto& card = visual->second.card;
+    if (card.pending) return true;
+    if (card.bounds.active(now) || card.opacity.active(now)) return true;
+    return visual->second.new_tab_hover.active(now);
 }
 
 } // namespace tabengine

@@ -159,33 +159,53 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_include_directories(tabengine_win32_demo PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_win32_demo PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_win32_demo PRIVATE tabengine_skia tabengine_win32)
+        tabengine_deploy_skia_dll(tabengine_win32_demo)
     endif()
+
+    # Tests and demos must run unattended: a launch with the bundled DLL
+    # missing from PATH pops a system loader dialog and blocks the whole
+    # suite, so deploy skia.dll beside every executable that links the
+    # shell whenever the shared Skia package carries one.
+    function(tabengine_deploy_skia_dll target)
+        if(EXISTS "${TABENGINE_SKIA_ROOT}/bin/skia.dll")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TABENGINE_SKIA_ROOT}/bin/skia.dll"
+                    "$<TARGET_FILE_DIR:${target}>/skia.dll"
+                VERBATIM)
+        endif()
+    endfunction()
 
     if(BUILD_TESTING)
         add_executable(tabengine_shell_test tests/shell_test.cpp)
         target_include_directories(tabengine_shell_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_shell_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_shell_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_shell_test)
         add_test(NAME tabengine_shell_test COMMAND tabengine_shell_test)
 
         add_executable(tabengine_shell_lifecycle_test tests/shell_lifecycle_test.cpp)
         target_include_directories(tabengine_shell_lifecycle_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_shell_lifecycle_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_shell_lifecycle_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_shell_lifecycle_test)
         add_test(NAME tabengine_shell_lifecycle_test COMMAND tabengine_shell_lifecycle_test)
 
         add_executable(tabengine_native_drag_cancel_test tests/native_drag_cancel_test.cpp)
         target_link_libraries(tabengine_native_drag_cancel_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_native_drag_cancel_test)
         add_test(NAME tabengine_native_drag_cancel_test COMMAND tabengine_native_drag_cancel_test)
 
         add_executable(tabengine_text_input_test tests/text_input_test.cpp)
         target_link_libraries(tabengine_text_input_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_text_input_test)
         add_test(NAME tabengine_text_input_test COMMAND tabengine_text_input_test)
 
         add_executable(tabengine_body_drag_test tests/body_drag_test.cpp)
         target_include_directories(tabengine_body_drag_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_body_drag_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_body_drag_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_body_drag_test)
         add_test(NAME tabengine_body_drag_test COMMAND tabengine_body_drag_test)
 
         add_executable(tabengine_windows_renderer_test tests/windows_renderer_test.cpp)
@@ -193,6 +213,7 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_include_directories(tabengine_windows_renderer_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_windows_renderer_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_windows_renderer_test PRIVATE tabengine_skia user32)
+        tabengine_deploy_skia_dll(tabengine_windows_renderer_test)
         add_test(NAME tabengine_windows_renderer_test COMMAND tabengine_windows_renderer_test)
     endif()
 endif()
