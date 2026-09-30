@@ -175,6 +175,14 @@ void ShellAutomationBridge::Impl::window_closed(WindowId window) {
             session.pointer_window = 0;
             session.held_buttons = 0;
         }
+        // Keys and IME follow their own focus window; dropping them on a
+        // closed window means releaseAll can no longer deliver their
+        // events, so the session forgets them here.
+        if (session.keyboard_window == window) {
+            session.keyboard_window = 0;
+            session.held_keys.clear();
+            session.ime_open = false;
+        }
     }
 }
 

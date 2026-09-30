@@ -131,9 +131,16 @@ Rect client_rect(IPlatform& platform, WindowId window) {
 
 } // namespace
 
+void ShellAutomationBridge::Impl::trace_expiry_check() {
+    if (trace_active && trace_has_deadline && runtime.now() >= trace_deadline) {
+        trace_active = false;
+    }
+}
+
 void ShellAutomationBridge::Impl::record_span(std::string name, std::string kind, double start,
                                               double end, std::string request_id,
                                               WindowId window, JsonValue details) {
+    trace_expiry_check();
     if (!trace_active) return;
     if (trace_spans.size() >= trace_max_spans) {
         ++trace_dropped;
@@ -275,14 +282,20 @@ void ShellAutomationBridge::Impl::register_capture_and_trace_domains() {
                 shell.on_event(paint);
             }
             const Size client = platform.client_size(window);
+            // The budget applies to what the caller asks us to produce (the
+            // region); the full-frame copy the renderer makes is bounded by
+            // the window surface the host already maintains. The client size
+            // is still read so a zero-sized window fails capture below.
             const std::size_t max_pixels = runtime.budgets().screenshot_max_pixels;
             const std::size_t region_pixels =
                 static_cast<std::size_t>(std::max(0, region.width)) *
                 static_cast<std::size_t>(std::max(0, region.height));
-            const std::size_t frame_pixels =
-                static_cast<std::size_t>(std::max(0, client.width)) *
-                static_cast<std::size_t>(std::max(0, client.height));
-            if (region_pixels > max_pixels || frame_pixels > max_pixels) {
+            if (client.width <= 0 || client.height <= 0) {
+                sink(MethodOutcome::failure(Error::make(
+                    ErrorCode::SurfaceUnavailable, "the window has no client area")));
+                return;
+            }
+            if (region_pixels > max_pixels) {
                 sink(MethodOutcome::failure(Error::make(
                     ErrorCode::BudgetExceeded,
                     "capture exceeds the configured pixel budget")));
@@ -397,14 +410,24 @@ void ShellAutomationBridge::Impl::register_capture_and_trace_domains() {
                     trace_max_spans = static_cast<std::size_t>(
                         std::min<std::int64_t>(value->as_integer(), 8192));
                 }
+                trace_has_deadline = false;
+                if (const JsonValue* value = context.params.find("durationS");
+                    value && value->is_number() && value->as_number() > 0.0) {
+                    trace_has_deadline = true;
+                    trace_deadline = runtime.now() +
+                                     std::min(value->as_number(),
+                                              runtime.budgets().trace_duration_s);
+                }
                 trace_active = true;
                 JsonValue result = JsonValue::object();
                 result.set("active", true);
                 result.set("maxSpans", static_cast<std::int64_t>(trace_max_spans));
+                if (trace_has_deadline) result.set("durationS", trace_deadline - runtime.now());
                 sink(MethodOutcome::success(std::move(result)));
                 return;
             }
             if (context.method == "Trace.status") {
+                trace_expiry_check();
                 JsonValue result = JsonValue::object();
                 result.set("active", trace_active);
                 result.set("spans", static_cast<std::int64_t>(trace_spans.size()));
@@ -431,6 +454,7 @@ void ShellAutomationBridge::Impl::register_capture_and_trace_domains() {
             result.set("dropped", static_cast<std::int64_t>(trace_dropped));
             result.set("spans", std::move(spans));
             trace_active = false;
+            trace_has_deadline = false;
             trace_spans.clear();
             trace_dropped = 0;
             sink(MethodOutcome::success(std::move(result)));

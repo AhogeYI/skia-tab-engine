@@ -397,6 +397,37 @@ void test_input_sessions_and_keys() {
     CHECK(harness.result(26).is_object());
 }
 
+void test_keyboard_release_survives_pointer_release() {
+    Harness harness;
+
+    // Hold a key, then hold and release the pointer on the same window:
+    // the keyboard session must keep its own focus so releaseAll still
+    // delivers the KeyUp to the real window (regression: keys used to ride
+    // on pointer_window, which the pointer release cleared).
+    harness.call(60,
+                 R"({"jsonrpc":"2.0","id":60,"method":"Input.key","params":{"windowId":"1","key":"k","kind":"down"}})");
+    CHECK(harness.result(60).is_object());
+    harness.call(61,
+                 R"({"jsonrpc":"2.0","id":61,"method":"Input.pointer","params":{"windowId":"1","kind":"down","x":50,"y":200}})");
+    CHECK(harness.result(61).is_object());
+    harness.call(62,
+                 R"({"jsonrpc":"2.0","id":62,"method":"Input.pointer","params":{"windowId":"1","kind":"up","x":50,"y":200}})");
+    CHECK(harness.result(62).is_object());
+
+    // KeyUp events reach the client body (the shell forwards releases).
+    const int before = harness.client.body_events_;
+    harness.call(63, R"({"jsonrpc":"2.0","id":63,"method":"Input.releaseAll"})");
+    CHECK(harness.result(63).is_object());
+    CHECK(harness.client.body_events_ > before);
+
+    // A plain key press now also produces a body KeyUp through the shell.
+    const int press_before = harness.client.body_events_;
+    harness.call(64,
+                 R"({"jsonrpc":"2.0","id":64,"method":"Input.key","params":{"windowId":"1","key":"b","kind":"press"}})");
+    CHECK(harness.result(64).is_object());
+    CHECK(harness.client.body_events_ >= press_before + 2);   // down + up
+}
+
 void test_in_strip_drag_reorder() {
     Harness harness;
 
@@ -594,6 +625,7 @@ int main() {
     test_window_and_tab_domains();
     test_ui_snapshot_and_node_click();
     test_input_sessions_and_keys();
+    test_keyboard_release_survives_pointer_release();
     test_in_strip_drag_reorder();
     test_environment_hooks_and_events();
     test_system_capabilities();

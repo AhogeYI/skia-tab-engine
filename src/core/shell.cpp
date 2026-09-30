@@ -631,6 +631,16 @@ void Shell::handle_event(const Event& event) {
                                    std::max(0, event.size.height - strip.height)});
         break;
     }
+    case EventType::KeyUp: {
+        // Releases complete the key contract for clients tracking held
+        // keys: no shortcut hook, no engine bindings, straight to the body
+        // like TextInput.
+        if (!model_.window(event.window)) break;
+        const auto strip = layout(event.window);
+        client_.body_event(event, {0, strip.height, event.size.width,
+                                   std::max(0, event.size.height - strip.height)});
+        break;
+    }
     }
 }
 

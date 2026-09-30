@@ -45,6 +45,10 @@ struct ShellAutomationBridge::Impl : ShellObserver {
         unsigned held_buttons = 0;
         Point last_client{};
         bool has_last_client = false;
+        // Keyboard focus for this session's held keys and IME composition,
+        // separate from the pointer: releasing the pointer must not strand
+        // keys on a cleared window id.
+        WindowId keyboard_window = 0;
         std::vector<int> held_keys;    // VK codes currently held by this session
         bool ime_open = false;
     };
@@ -107,6 +111,12 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     std::size_t trace_max_spans = 512;
     std::size_t trace_dropped = 0;
     std::vector<TraceSpan> trace_spans;
+    // Trace.start(durationS) expiry: once the runtime clock passes the
+    // deadline the trace deactivates itself at the next span/status/stop
+    // touch; spans are kept for Trace.stop to collect.
+    bool trace_has_deadline = false;
+    double trace_deadline = 0.0;
+    void trace_expiry_check();
     void record_span(std::string name, std::string kind, double start, double end,
                      std::string request_id = {}, WindowId window = 0,
                      JsonValue details = JsonValue{});

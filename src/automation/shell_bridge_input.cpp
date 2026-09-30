@@ -345,13 +345,13 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event up;
                 up.type = EventType::KeyUp;
                 up.key = vk;
-                up.window = session.pointer_window;
+                up.window = session.keyboard_window;
                 shell.on_event(up);
             }
             if (session.ime_open) {
                 Event cancel;
                 cancel.type = EventType::ImeCancel;
-                cancel.window = session.pointer_window;
+                cancel.window = session.keyboard_window;
                 shell.on_event(cancel);
             }
             session = InputSession{};
@@ -785,7 +785,8 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             } else if (kind == "down") {
                 send_key(EventType::KeyDown);
                 session.held_keys.push_back(vk);
-                session.pointer_window = session.pointer_window ? session.pointer_window : window;
+                session.keyboard_window = session.keyboard_window ? session.keyboard_window
+                                                                 : window;
             } else if (kind == "up") {
                 send_key(EventType::KeyUp);
                 std::erase(session.held_keys, vk);
@@ -864,7 +865,8 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             if (kind == "start") {
                 type = EventType::ImeStart;
                 session.ime_open = true;
-                session.pointer_window = session.pointer_window ? session.pointer_window : window;
+                session.keyboard_window = session.keyboard_window ? session.keyboard_window
+                                                                 : window;
             } else if (kind == "update") {
                 type = EventType::ImeUpdate;
                 session.ime_open = true;
