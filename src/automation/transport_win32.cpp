@@ -62,7 +62,8 @@ struct SocketGuard {
 bool parse_http_request(const std::string& header, std::string& method, std::string& target,
                         std::size_t& content_length, std::string& host,
                         std::string& origin, std::string& authorization,
-                        std::string& session_header, bool& has_body) {
+                        std::string& session_header, std::string& alt_token,
+                        bool& has_body, const std::string& alt_header_name) {
     const std::size_t line_end = header.find("\r\n");
     if (line_end == std::string::npos) return false;
     const std::string request_line = header.substr(0, line_end);
@@ -108,6 +109,8 @@ bool parse_http_request(const std::string& header, std::string& method, std::str
             authorization = value;
         } else if (name == "x-tabengine-session") {
             session_header = value;
+        } else if (!alt_header_name.empty() && name == alt_header_name) {
+            alt_token = value;
         }
         position = end + 2;
     }
@@ -440,10 +443,11 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     std::string origin;
     std::string authorization;
     std::string session_header;
+    std::string alt_token;
     std::size_t content_length = 0;
     bool has_body = false;
     if (!parse_http_request(header, method, target, content_length, host, origin, authorization,
-                            session_header, has_body)) {
+                            session_header, alt_token, has_body, config.alt_token_header)) {
         bump([](Stats& stats) { ++stats.rejected; });
         send_simple(socket, 400, "application/json",
                     json_error_payload(400, "malformed request"), monotonic() + config.io_timeout_s);
@@ -467,7 +471,12 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
         return;
     }
     const std::string expected = "Bearer " + config.token;
-    if (!constant_time_equal(authorization, expected)) {
+    const bool bearer_ok = constant_time_equal(authorization, expected);
+    // Compatibility header (host-mounted legacy clients): same token, same
+    // lockout, compared with the same fixed-work discipline.
+    const bool alt_ok = !config.alt_token_header.empty() && !alt_token.empty() &&
+                        constant_time_equal(alt_token, config.token);
+    if (!bearer_ok && !alt_ok) {
         bump([](Stats& stats) { ++stats.rejected; ++stats.auth_failures; });
         const std::uint64_t failures = auth_failures.fetch_add(1) + 1;
         const bool locked = failures >= config.auth_failure_limit;

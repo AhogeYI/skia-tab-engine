@@ -715,6 +715,7 @@ void test_extra_routes_and_auth_callback() {
     TransportConfig config;
     config.token = "tok";
     config.response_timeout_s = 2.0;
+    config.alt_token_header = "x-dev-token";
     AutomationTransport transport{runtime, config};
     std::atomic<std::uint64_t> seen_failures{0};
     std::atomic<bool> seen_locked{false};
@@ -810,6 +811,15 @@ void test_extra_routes_and_auth_callback() {
                             "Authorization: Bearer tok\r\n\r\n");
     });
     CHECK(declined.status == 404);
+
+    // The compatibility header carries the same token (legacy clients).
+    const HttpResponse compat = pump([&] {
+        return http_request(transport.port(),
+                            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            "x-dev-token: tok\r\n\r\n");
+    });
+    CHECK(compat.status == 200);
+    CHECK(compat.body == R"({"ok":true})");
 
     // The same surface refuses bad tokens and reports to the audit hook.
     const HttpResponse denied = http_request(

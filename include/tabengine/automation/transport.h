@@ -51,6 +51,10 @@ struct TransportConfig {
                                       // is cancelled against on timeout
     std::size_t auth_failure_limit = 5;   // then refuse new connections
     double auth_lockout_s = 5.0;
+    // Optional compatibility header carrying the SAME token (e.g. a
+    // product's legacy control clients). "Authorization: Bearer" stays
+    // the canonical form; both feed one lockout counter.
+    std::string alt_token_header;
     double session_idle_timeout_s = 30.0; // logical session idle expiry
     std::size_t max_sessions = 16;        // concurrent logical sessions
 };
