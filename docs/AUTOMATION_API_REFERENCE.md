@@ -128,9 +128,12 @@ path-qualified (`params.windowId: expected string`).
 
 - `ArtifactStore`: `store(bytes, media_type, target, now)` returns an id
   (empty when the payload alone exceeds the budget); `get`/`metadata`
-  read entries; `expire(now)` drops TTL-expired entries; eviction is
-  oldest-first at the byte budget. Entries carry size, SHA-256, media
-  type, TTL and target metadata.
+  read entries and enforce the TTL - either through an explicit `now` or
+  through the read clock installed with `set_read_clock` (the runtime
+  installs its own clock, so reads from transport threads expire idle
+  artifacts without waiting for a drain); `expire(now)` drops TTL-expired
+  entries; eviction is oldest-first at the byte budget. Entries carry
+  size, SHA-256, media type, TTL and target metadata.
 - `sha256_hex`: lowercase hex digest helper.
 
 ## runtime.h - the runtime
@@ -146,26 +149,48 @@ path-qualified (`params.windowId: expected string`).
 - `RuntimeEnvironmentHooks`: engine-side wait predicates
   (`animation_active`, `frame_serial`, `node_exists`) filled by the shell
   bridge; absent hooks make the matching conditions `Unsupported`.
+- `RequestCancellation`: the handle returned by `receive_with_deadline`.
+  `cancel()` is idempotent and thread-safe; a queued request is dropped
+  and answered `Cancelled` without executing, an executing one settles
+  `Cancelled` at the next drain unless its handler finished first.
+- `ConnectionObserverRegistration` / `EnvironmentHooksRegistration`:
+  move-only RAII registrations for `add_connection_observer` and
+  `install_environment_hooks`. Destroying a hook registration revokes the
+  hooks (unless a later installation superseded them) and fails the
+  dependent waits with `Unsupported`; destroying an observer detaches it.
 - `UiTaskPump`: `bind_platform(platform)` installs the single platform
   wake handler; `subscribe(drain)` adds a coalesced drain subscriber with
   a move-only RAII `Subscription`. The pump must not outlive its platform.
 - `AutomationRuntime`:
-  - construction: budgets, identity, monotonic `clock`.
+  - construction: budgets, identity, monotonic `clock`. The clock is also
+    installed as the artifact store's read clock, so read-side TTL checks
+    share the deadline base.
   - registration: `register_methods` (app domains), `register_engine_methods`
     (bridge/tests), `register_semantic_provider`,
     `register_activity_provider`, `register_diagnostics_provider`,
-    `set_policy`, `set_environment_hooks`, `set_instance_capabilities`.
+    `set_policy`, `set_environment_hooks`, `install_environment_hooks`,
+    `set_instance_capabilities`.
   - transport-facing (thread-safe): `set_response_sink`, `receive`,
-    `connection_closed`, `set_wake`, `set_deferred_wake`.
+    `receive_with_deadline`, `connection_closed`, `add_connection_observer`,
+    `set_wake`, `set_deferred_wake`. `connection_closed` cancels the
+    connection's queued requests and queues the id for observers that run
+    on the next UI drain (bridges release session-held input there).
   - UI thread: `drain(now)`, `shutdown(now)`, `emit_event`,
     `start_operation`, `finish_operation`, `get_operation`, `log`.
+    `drain` sweeps the queue for cancelled/expired entries before starting
+    anything, so queued requests never outlive their deadlines.
   - queries: `budgets`, `identity`, `now`, `has_method`,
     `artifacts()`, `build_schema_document`, `semantic_providers`,
-    `activity_providers`, `instance_capabilities`.
+    `activity_providers`, `semantic_provider_entries`,
+    `activity_provider_entries` (stable, never-reused registration slots;
+    semantic slots share the node-ref top byte, 9..255, and registration
+    fails once that space is exhausted), `instance_capabilities`.
   - engine-internal domains installed automatically: `System.getInfo`,
     `System.getCapabilities`, `System.getSchema`, `Event.poll`,
     `Operation.get/wait/cancel`, `Wait.condition`, `Log.read`,
-    `Artifact.get`.
+    `Artifact.get`. `Operation.wait` reports the operation's full terminal
+    state (`state` plus `result` or `error`, and `waitedS`) identically
+    for waits issued before or after the outcome.
 
 ## shell_bridge.h - binding a Shell
 
@@ -186,12 +211,23 @@ path-qualified (`params.windowId: expected string`).
 
 - `TransportConfig`: host/port (loopback literal, 0 = OS-assigned),
   token (required), header/body caps, `max_connections`, socket and
-  response timeouts, auth-failure limit and lockout.
+  response timeouts (the response timeout also caps the runtime deadline
+  and is cancelled against on expiry), auth-failure limit and lockout,
+  `session_idle_timeout_s` and `max_sessions` for logical sessions.
 - `AutomationTransport`: `start()` (false on empty token, bind conflict or
   Winsock failure - it never listens elsewhere), `stop()` (bounded,
-  idempotent, joins workers, closes every owned socket), `running`,
-  `port`, `endpoint`, `describe()` (connection descriptor without the
-  token), `stats()`.
+  idempotent: cancels outstanding runtime requests, joins workers - all
+  socket I/O aborts on stop within a 250 ms slice - closes every owned
+  socket and ends every logical session), `running`, `port`, `endpoint`,
+  `describe()` (connection descriptor without the token), `stats()`.
+- Logical sessions: `POST /automation/v1/session` begins one,
+  `X-TabEngine-Session: <id>` binds later requests to the same connection
+  identity, `DELETE /automation/v1/session` ends it (idle expiry and
+  transport stop end it too). Requests without the header are ephemeral:
+  their connection closes right after the single response, cancelling
+  leftovers and releasing held input. All socket reads and writes run
+  against an absolute deadline; a trickling client cannot extend its
+  budget, and slow clients never block other connections or `stop()`.
 
 ## render.h - capture capability
 

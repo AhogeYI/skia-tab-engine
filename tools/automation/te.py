@@ -36,16 +36,20 @@ class AutomationError(Exception):
 class AutomationClient:
     """One JSON-RPC request per HTTP request; connection closes after each."""
 
-    def __init__(self, endpoint: str, token: str, timeout_s: float = 30.0):
+    def __init__(self, endpoint: str, token: str, timeout_s: float = 30.0,
+                 session: str | None = None):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.timeout_s = timeout_s
+        self.session = session
         self._next_id = 1
 
     def _request(self, method: str, path: str, body: bytes | None,
                  content_type: str) -> tuple[int, bytes, dict]:
         request = urllib.request.Request(self.endpoint + path, data=body, method=method)
         request.add_header("Authorization", "Bearer " + self.token)
+        if self.session:
+            request.add_header("X-TabEngine-Session", self.session)
         if body is not None:
             request.add_header("Content-Type", content_type)
         try:
@@ -85,6 +89,17 @@ class AutomationClient:
             "GET", f"{PROTOCOL_PREFIX}/artifacts/{artifact_id}", None, "")
         return raw, headers.get("Content-Type", "application/octet-stream")
 
+    def session_begin(self) -> str:
+        _, raw, _ = self._request("POST", f"{PROTOCOL_PREFIX}/session", None, "")
+        return json.loads(raw.decode("utf-8"))["sessionId"]
+
+    def session_end(self, session: str) -> None:
+        saved, self.session = self.session, session
+        try:
+            self._request("DELETE", f"{PROTOCOL_PREFIX}/session", None, "")
+        finally:
+            self.session = saved
+
     def info(self) -> dict:
         return self.call("System.getInfo")
 
@@ -106,8 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="connection descriptor JSON written by the host")
     parser.add_argument("--json", action="store_true", help="raw JSON output")
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--session",
+                        help="logical session id (see 'session begin'); keeps raw input "
+                             "gestures on one connection identity")
 
     commands = parser.add_subparsers(dest="command", required=True)
+    session_commands = commands.add_parser("session", help="begin/end a logical session")
+    session_commands.add_argument("action", choices=("begin", "end"))
+    session_commands.add_argument("session_id", nargs="?",
+                                  help="session id to end (begin prints a new one)")
+
     commands.add_parser("info", help="instance identity and capabilities")
     commands.add_parser("schema", help="machine-readable method schema")
     commands.add_parser("windows", help="list windows")
@@ -198,13 +221,24 @@ def resolve_connection(args) -> AutomationClient:
         raise SystemExit("provide --endpoint or --descriptor")
     if not token:
         raise SystemExit("provide --token, --token-file or TABENGINE_TOKEN")
-    return AutomationClient(endpoint, token, timeout_s=args.timeout)
+    return AutomationClient(endpoint, token, timeout_s=args.timeout,
+                            session=getattr(args, "session", None))
 
 
 def run(args) -> int:
     client = resolve_connection(args)
     command = args.command
-    if command == "info":
+    if command == "session":
+        if args.action == "begin":
+            session_id = client.session_begin()
+            _print({"sessionId": session_id,
+                    "hint": "pass it as --session <id> on later commands"}, args.json)
+        else:
+            if not args.session_id:
+                raise SystemExit("session end needs the session id")
+            client.session_end(args.session_id)
+            _print({"ended": args.session_id}, args.json)
+    elif command == "info":
         _print(client.info(), args.json)
     elif command == "schema":
         _print(client.schema(), args.json)

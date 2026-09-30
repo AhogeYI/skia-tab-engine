@@ -101,7 +101,48 @@ starts** is answered `DeadlineExceeded` and is _never executed_.
   Schema parameter/result contracts, grants, timeouts, events, error
   catalogue, budgets, activity scopes.
 - `GET /automation/v1/artifacts/<id>` - artifact bytes with an ETag; 404
-  once expired.
+  once expired. The route is authorized through a real `Artifact.get`
+  request: the session policy, the `engine.observe` grant and the TTL are
+  enforced exactly as for the RPC route, so artifacts never leak past a
+  denied or ungranted session.
+- `POST /automation/v1/session` - begin a logical session; returns
+  `{"sessionId": "..."}`.
+- `DELETE /automation/v1/session` - end the session named by the
+  `X-TabEngine-Session` header.
+
+### Logical sessions and input lifetime
+
+Every HTTP request without a session header is its own **ephemeral
+connection**: the transport closes it right after the single response,
+which cancels anything still queued for it and releases whatever input
+that request left held (buttons, keys, IME) on the next UI drain. Atomic
+actions (`Input.click`, `Input.drag`, `Input.typeText`) work fine that
+way. Raw, multi-request gestures do not - each request would release the
+previous one's state.
+
+For those, `POST /automation/v1/session` once, then send the returned id
+as the `X-TabEngine-Session` header on every request of the gesture. All
+such requests share one connection identity, so `Input.pointer`
+down/move/up, `Input.key` down/up and multi-segment `Input.ime`
+sequences pair correctly, and `Input.releaseAll` releases the right
+session. Sessions are bound to the Bearer token (authentication runs
+before the header is consulted), expire after a configurable idle
+timeout (`session_idle_timeout_s`, swept by the accept loop, not by
+client traffic) and are capped by `max_sessions` (429 beyond the cap).
+Ending a session - explicitly, by idle expiry, or when the transport
+stops - cancels its in-flight requests and releases its held input.
+An unknown or expired session id answers 404.
+
+### Transport deadlines and cancellation
+
+The transport's `response_timeout_s` is a hard cap on the whole exchange:
+it bounds the HTTP wait **and** the runtime execution deadline of the
+request. When the wait expires the transport answers 503 and cancels the
+runtime request, so a queued mutation never executes after its client has
+already seen a failure. Cancellation is precise but cooperative once a
+handler started: work that already began may still finish (side effects
+are not rolled back) - operations remain queryable through
+`Operation.get`/`Operation.wait` for exactly that reason.
 
 All identifiers on the wire (`windowId`, `tabId`, `contentId`, node refs,
 sequence numbers, operation ids) are **decimal strings** so JavaScript
@@ -165,15 +206,22 @@ so hosts can tighten or widen a live session.
 - The semantic tree merges the engine's chrome (window, tab strip, tabs,
   close buttons, new-tab button, caption buttons/area, body) with every
   registered provider's subtree under the body node. Node refs embed the
-  provider slot and are only meaningful together with the snapshot that
-  produced them.
+  provider's **registration slot** - a stable identity that is never
+  reused, so a ref minted for an unregistered provider fails with
+  `StaleNode` instead of addressing whatever provider took its place. Refs
+  are only meaningful together with the snapshot that produced them.
 - `Input.click` accepts raw coordinates, a `node` ref, or a `stableKey`.
-  Node clicks re-resolve the node against the **current** tree, check
-  visibility/enabled/clip, then click the current hit position - animation
-  movement is fine, but a removed or hidden node reports
-  `StaleNode`/`NotInteractable` instead of clicking something else.
-  Passing `snapshotId` with `strict: true` additionally fails when the
-  layout revision changed since the snapshot.
+  Node clicks resolve through the **authoritative owner** - engine kinds
+  through the shell, provider nodes through that provider's
+  `resolve_node` - then check visibility/enabled/clip and click inside the
+  visible portion. Animation movement is fine, but a removed, rebuilt or
+  hidden node reports `StaleNode`/`NotInteractable` instead of clicking
+  something else. Passing `snapshotId` with `strict: true` (node or
+  stableKey mode, and `Capture.screenshot` node mode) additionally fails
+  when the **merged layout revision** changed since the snapshot - that
+  revision folds provider-reported revisions and attach/detach into the
+  shell's own, so a provider DOM rebuild invalidates pinned refs even
+  while the shell itself was idle.
 - `Input.drag` synthesizes a full pointer gesture. Inside the tab strip it
   reorders; leaving the strip tears the tab into a stepwise move session
   through the same shell state machine a real mouse uses, so attaching
@@ -185,8 +233,9 @@ so hosts can tighten or widen a live session.
   `typeText` delivers text as `TextInput` events that never pass the
   shortcut hook.
 - Pointer sessions are owned per connection: two clients cannot interleave
-  half a gesture on one window (`SessionConflict`). `Input.releaseAll` and
-  disconnects release buttons, keys and any open IME composition.
+  half a gesture on one window (`SessionConflict`). `Input.releaseAll`,
+  connection close, session end/expiry and transport stop all release
+  buttons, keys and any open IME composition on the UI thread.
 
 ## Frames and capture
 
@@ -219,9 +268,18 @@ client-area capture.
   tasks), `nodeAppears`, `operationDone`, `animationSettled`,
   `frameStable`. Unknown scopes report `Unsupported`; watchers and
   long-lived background work must not be counted as pending, or waits
-  would never settle.
+  would never settle. An `activityQuiet` wait binds to the providers that
+  knew the scope when it started: if one of them unregisters (or stops
+  recognizing the scope), the wait fails with `ProviderUnavailable` -
+  "no observation" never proves "no work". Providers that join later
+  contribute their pending counts, so new work can delay a wait but never
+  fake quiet.
 - Long work returns an `operationId`; `Operation.get/wait/cancel` query
-  it. Cancellation is cooperative and never pretends to roll back side
+  it. `Operation.wait` reports the operation's full terminal state -
+  including `state: "failed"` with its error, or `state: "completed"`
+  with its result - identically whether the wait started before or after
+  the outcome; a failed operation never hides behind a satisfied wait.
+  Cancellation is cooperative and never pretends to roll back side
   effects that already ran.
 - `Event.poll` returns sequence-numbered events with explicit gap
   reporting (`gap`, `oldestAvailable`): after a gap, re-synchronize from a
@@ -290,9 +348,11 @@ runtime.set_policy(&policy);
 - **Python CLI** (`tools/automation/te.py` in every SDK package, standard
   library only): `info`, `windows`, `tabs`, `snapshot`, `click`, `key`,
   `type`, `wheel`, `drag`, `screenshot --out shot.png`, `wait`, `op-*`,
-  `logs`, `events`, `trace-*`, and a raw `call` escape hatch. Connection
-  comes from `--endpoint`/`--descriptor` plus `--token`/`--token-file`/
-  `TABENGINE_TOKEN`; failures exit non-zero with the RPC error on stderr.
+  `logs`, `events`, `trace-*`, `session begin|end`, and a raw `call`
+  escape hatch. Connection comes from `--endpoint`/`--descriptor` plus
+  `--token`/`--token-file`/`TABENGINE_TOKEN`; `--session <id>` routes raw
+  input gestures through one logical session; failures exit non-zero with
+  the RPC error on stderr.
 - The packaged `examples/automation_demo` shows the whole host wiring and
   supports `--self-check`, which proves the packaged binary answers real
   protocol calls end to end.
