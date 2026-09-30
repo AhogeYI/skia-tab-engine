@@ -176,6 +176,11 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     // UI/semantic helpers (shell_bridge_ui.cpp)
     [[nodiscard]] bool resolve_engine_node(WindowId window, unsigned kind, std::uint64_t local,
                                            SemanticNode& out) const;
+    // Same resolution against a precomputed chrome-target list, so snapshot
+    // assembly costs one chrome_targets() pass instead of one per node.
+    [[nodiscard]] bool resolve_engine_node_from(const std::vector<Shell::ChromeTarget>& targets,
+                                                WindowId window, unsigned kind,
+                                                std::uint64_t local, SemanticNode& out) const;
     [[nodiscard]] bool engine_node_exists(WindowId window, std::string_view stable_key) const;
     // Authoritative node-ref resolution across the merged tree: engine
     // kinds resolve from the shell, provider slots through the owning

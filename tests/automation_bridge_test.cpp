@@ -1148,6 +1148,35 @@ void test_http_input_sessions_end_to_end() {
     transport.stop();
 }
 
+// Snapshot assembly must stay linear in the tab count: one chrome-target
+// pass resolves every strip node (guards the O(N^2) regression).
+void test_snapshot_with_many_tabs() {
+    Harness harness;
+    for (int i = 0; i < 39; ++i) {
+        CHECK(harness.shell.new_tab(1) != 0);
+    }
+    CHECK(harness.shell.model().window(1)->tabs.size() == 40);
+
+    harness.call(330,
+                 R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+    const JsonValue snapshot = harness.result(330);
+    CHECK(snapshot.find("truncated")->as_boolean() == false);
+    std::size_t tabs = 0;
+    std::size_t close_buttons = 0;
+    std::unordered_set<std::string> refs;
+    for (const JsonValue& node : snapshot.find("nodes")->items()) {
+        const std::string role = node.find("role")->as_string();
+        if (role == "tab") {
+            ++tabs;
+            refs.insert(node.find("node")->as_string());
+        }
+        if (role == "tabCloseButton") ++close_buttons;
+    }
+    CHECK(tabs == 40);
+    CHECK(refs.size() == 40);   // every tab keeps a distinct ref
+    CHECK(close_buttons >= 1);
+}
+
 } // namespace
 
 int main() {
@@ -1165,5 +1194,6 @@ int main() {
     test_clip_aware_click_point();
     test_hooks_revoked_on_bridge_destruction();
     test_http_input_sessions_end_to_end();
+    test_snapshot_with_many_tabs();
     return 0;
 }

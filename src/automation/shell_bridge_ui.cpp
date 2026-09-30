@@ -100,6 +100,12 @@ const JsonValue kObjectSchema = [] {
 bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned kind,
                                                       std::uint64_t local,
                                                       SemanticNode& out) const {
+    return resolve_engine_node_from(shell.chrome_targets(window), window, kind, local, out);
+}
+
+bool ShellAutomationBridge::Impl::resolve_engine_node_from(
+    const std::vector<Shell::ChromeTarget>& targets, WindowId window, unsigned kind,
+    std::uint64_t local, SemanticNode& out) const {
     const WindowTabs* tabs = shell.model().window(window);
     if (!tabs) return false;
     const Size size = platform.client_size(window);
@@ -125,7 +131,7 @@ bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned 
         const auto it = std::find_if(tabs->tabs.begin(), tabs->tabs.end(),
                                      [local](const Tab& tab) { return tab.id == local; });
         if (it == tabs->tabs.end() || it->closing) return false;
-        for (const Shell::ChromeTarget& target : shell.chrome_targets(window)) {
+        for (const Shell::ChromeTarget& target : targets) {
             if (target.kind == Shell::ChromeTarget::Kind::Tab && target.tab == local) {
                 out.role = std::string(roles::kTab);
                 out.name = it->title;
@@ -149,7 +155,7 @@ bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned 
         const auto it = std::find_if(tabs->tabs.begin(), tabs->tabs.end(),
                                      [local](const Tab& tab) { return tab.id == local; });
         if (it == tabs->tabs.end() || it->closing) return false;
-        for (const Shell::ChromeTarget& target : shell.chrome_targets(window)) {
+        for (const Shell::ChromeTarget& target : targets) {
             if (target.kind == Shell::ChromeTarget::Kind::CloseTab && target.tab == local) {
                 out.role = std::string(roles::kTabCloseButton);
                 out.name = "Close tab";
@@ -164,7 +170,7 @@ bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned 
         return false;
     }
     case kNodeNewTab:
-        for (const Shell::ChromeTarget& target : shell.chrome_targets(window)) {
+        for (const Shell::ChromeTarget& target : targets) {
             if (target.kind == Shell::ChromeTarget::Kind::NewTab) {
                 out.role = std::string(roles::kNewTabButton);
                 out.name = "New tab";
@@ -178,7 +184,7 @@ bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned 
         }
         return false;
     case kNodeCaption: {
-        for (const Shell::ChromeTarget& target : shell.chrome_targets(window)) {
+        for (const Shell::ChromeTarget& target : targets) {
             if (target.kind == Shell::ChromeTarget::Kind::CaptionButton &&
                 target.button == static_cast<int>(local)) {
                 out.role = std::string(roles::kCaptionButton);
@@ -193,7 +199,7 @@ bool ShellAutomationBridge::Impl::resolve_engine_node(WindowId window, unsigned 
         return false;
     }
     case kNodeCaptionArea:
-        for (const Shell::ChromeTarget& target : shell.chrome_targets(window)) {
+        for (const Shell::ChromeTarget& target : targets) {
             if (target.kind == Shell::ChromeTarget::Kind::CaptionArea) {
                 out.role = std::string(roles::kCaptionArea);
                 out.stable_key = "captionArea";
@@ -439,7 +445,11 @@ SemanticSnapshot ShellAutomationBridge::Impl::build_snapshot(WindowId window,
     const std::uint64_t body_ref = engine_node_ref(kNodeBody, 0);
 
     if (const WindowTabs* tabs = shell.model().window(window)) {
-        for (const Shell::ChromeTarget& target : shell.chrome_targets(window)) {
+        // One chrome-target pass feeds every strip node: chrome_targets()
+        // recomputes the strip layout, so per-node queries made snapshot
+        // assembly quadratic in the tab count.
+        const std::vector<Shell::ChromeTarget> targets = shell.chrome_targets(window);
+        for (const Shell::ChromeTarget& target : targets) {
             SemanticNode node;
             switch (target.kind) {
             case Shell::ChromeTarget::Kind::Tab: {
@@ -448,24 +458,32 @@ SemanticSnapshot ShellAutomationBridge::Impl::build_snapshot(WindowId window,
                                                  return tab.id == id;
                                              });
                 if (it == tabs->tabs.end()) continue;
-                if (!resolve_engine_node(window, kNodeTab, target.tab, node)) continue;
+                if (!resolve_engine_node_from(targets, window, kNodeTab, target.tab, node)) {
+                    continue;
+                }
                 node.content = it->content;
                 break;
             }
             case Shell::ChromeTarget::Kind::CloseTab:
-                if (!resolve_engine_node(window, kNodeTabClose, target.tab, node)) continue;
+                if (!resolve_engine_node_from(targets, window, kNodeTabClose, target.tab,
+                                              node)) {
+                    continue;
+                }
                 break;
             case Shell::ChromeTarget::Kind::NewTab:
-                if (!resolve_engine_node(window, kNodeNewTab, 0, node)) continue;
+                if (!resolve_engine_node_from(targets, window, kNodeNewTab, 0, node)) continue;
                 break;
             case Shell::ChromeTarget::Kind::CaptionButton:
-                if (!resolve_engine_node(window, kNodeCaption,
-                                         static_cast<std::uint64_t>(target.button), node)) {
+                if (!resolve_engine_node_from(targets, window, kNodeCaption,
+                                              static_cast<std::uint64_t>(target.button),
+                                              node)) {
                     continue;
                 }
                 break;
             case Shell::ChromeTarget::Kind::CaptionArea:
-                if (!resolve_engine_node(window, kNodeCaptionArea, 0, node)) continue;
+                if (!resolve_engine_node_from(targets, window, kNodeCaptionArea, 0, node)) {
+                    continue;
+                }
                 break;
             default:
                 continue;
