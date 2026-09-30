@@ -365,6 +365,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             sink(MethodOutcome::failure(Error::target_not_found("window " + id_to_wire(window))));
             return;
         }
+        const SpanScope span_scope(this, context.method, "input", context.request_id, window);
 
         if (context.method == "Input.click") {
             PointerButton button;

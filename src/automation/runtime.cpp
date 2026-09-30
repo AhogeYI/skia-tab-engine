@@ -819,6 +819,7 @@ UiTaskPump::~UiTaskPump() {
 AutomationRuntime::AutomationRuntime(RuntimeBudgets budgets, InstanceIdentity identity,
                                      std::function<double()> clock)
     : impl_(std::make_shared<Impl>(budgets, std::move(identity), std::move(clock))) {
+    artifacts_ = std::make_shared<ArtifactStore>(budgets.artifact_bytes, budgets.artifact_ttl_s);
     impl_->self_weak = impl_;
     register_internal_domains();
 }
@@ -826,6 +827,8 @@ AutomationRuntime::AutomationRuntime(RuntimeBudgets budgets, InstanceIdentity id
 AutomationRuntime::~AutomationRuntime() = default;
 
 const RuntimeBudgets& AutomationRuntime::budgets() const { return impl_->budgets; }
+
+double AutomationRuntime::now() const { return impl_->clock(); }
 
 const InstanceIdentity& AutomationRuntime::identity() const { return impl_->identity; }
 
@@ -1145,6 +1148,7 @@ bool AutomationRuntime::get_operation(std::uint64_t id, OperationInfo& out) cons
 void AutomationRuntime::drain(double now) {
     Impl& impl = *impl_;
     if (stopped_.load(std::memory_order_acquire)) return;
+    if (artifacts_) artifacts_->expire(now);
 
     // 1. Sweep executing requests for deadline and cancellation.
     std::vector<std::uint64_t> expired;
@@ -1855,6 +1859,36 @@ void AutomationRuntime::register_internal_domains() {
             sink(MethodOutcome::success(std::move(result)));
         };
         impl_->install_domain("Log", std::move(methods), std::move(handler), true);
+    }
+
+    // Artifact domain: metadata lookup; bytes travel over the transport's
+    // artifact route, not through JSON-RPC.
+    {
+        std::vector<MethodDescriptor> methods;
+        methods.push_back(make_descriptor(
+            "Artifact.get", "Metadata of a stored artifact (size, sha256, media type, TTL).",
+            {observe}, false, true, 10.0,
+            schema_object({{"artifactId", string_property("Artifact id")}}, {"artifactId"}),
+            JsonValue::object()));
+        MethodHandler handler = [this](const RequestContext& context, CompletionSink sink) {
+            const JsonValue* value = context.params.find("artifactId");
+            if (!value || !value->is_string()) {
+                sink(MethodOutcome::failure(
+                    Error::invalid_params("params.artifactId: expected a string")));
+                return;
+            }
+            JsonValue metadata;
+            if (!artifacts_ || !artifacts_->metadata(value->as_string(), metadata)) {
+                Error error = Error::make(ErrorCode::TargetNotFound,
+                                          "artifact '" + value->as_string() +
+                                              "' does not exist or expired");
+                error.data.set("type", "ArtifactNotFound");
+                sink(MethodOutcome::failure(std::move(error)));
+                return;
+            }
+            sink(MethodOutcome::success(std::move(metadata)));
+        };
+        impl_->install_domain("Artifact", std::move(methods), std::move(handler), true);
     }
 }
 

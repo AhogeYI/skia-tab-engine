@@ -189,6 +189,38 @@ public:
         return {RenderBackend::D3D12, it->second->size};
     }
 
+    bool supports_capture() const override { return true; }
+
+    bool capture_frame(WindowId id, CapturedFrame& out) override {
+        auto it = windows_.find(id);
+        if (it == windows_.end() || device_lost_) return false;
+        WindowSurface& window = *it->second;
+        // window.index still points at the just-presented frame; its fence
+        // guarantees the GPU finished writing it. A frame that was never
+        // presented has no fence value and cannot be captured.
+        Frame& frame = window.frames[window.index];
+        if (!frame.surface || frame.fence_value == 0) return false;
+        if (!window.wait_for(frame.fence_value)) {
+            device_lost_ = true;
+            return false;
+        }
+        // The swapchain buffer is a render-target-only resource: Skia's
+        // snapshot path copies it into a samplable texture, then a
+        // synchronous GPU readback fills the caller's pixels. Bounded by
+        // the fence wait above; raster is never substituted here.
+        sk_sp<SkImage> image = frame.surface->makeImageSnapshot();
+        if (!image) return false;
+        const SkImageInfo info = SkImageInfo::MakeN32Premul(image->width(), image->height());
+        out.backend = RenderBackend::D3D12;
+        out.size = {image->width(), image->height()};
+        const std::size_t row_bytes = static_cast<std::size_t>(image->width()) * 4;
+        out.pixels.resize(row_bytes * static_cast<std::size_t>(image->height()));
+        if (!image->readPixels(context_.get(), info, out.pixels.data(), row_bytes, 0, 0)) {
+            return false;
+        }
+        return true;
+    }
+
 private:
     bool wrap(WindowSurface& window, Size size) {
         GrD3DTextureResourceInfo resource_info(nullptr, nullptr, D3D12_RESOURCE_STATE_PRESENT,
@@ -300,6 +332,17 @@ public:
         auto it = backends_.find(id);
         if (it == backends_.end()) return {};
         return it->second.gpu ? gpu_->info(id) : raster_->info(id);
+    }
+
+    bool supports_capture() const override { return true; }
+
+    bool capture_frame(WindowId id, CapturedFrame& out) override {
+        auto it = backends_.find(id);
+        if (it == backends_.end()) return false;
+        // Capture never switches backends: a window capturing through
+        // D3D12 reports D3D12 pixels (or fails); it is never silently
+        // answered with the raster fallback's buffer.
+        return it->second.gpu ? gpu_->capture_frame(id, out) : raster_->capture_frame(id, out);
     }
 
 private:

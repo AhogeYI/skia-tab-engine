@@ -14,6 +14,7 @@
 // through UiTaskPump and call drain() from their own loop.
 
 #include "tabengine/automation/activity.h"
+#include "tabengine/automation/artifacts.h"
 #include "tabengine/automation/diagnostics.h"
 #include "tabengine/automation/errors.h"
 #include "tabengine/automation/events.h"
@@ -214,7 +215,15 @@ public:
     // ---- queries ----
     [[nodiscard]] const RuntimeBudgets& budgets() const;
     [[nodiscard]] const InstanceIdentity& identity() const;
+    // Current monotonic time on the runtime's clock (the same base used for
+    // deadlines, operations, artifacts and events). UI thread.
+    [[nodiscard]] double now() const;
     [[nodiscard]] bool has_method(std::string_view name) const;
+    // Bounded binary artifact store (screenshots, traces). Bytes are served
+    // by the transport's artifact route, never written to disk by the
+    // engine.
+    [[nodiscard]] ArtifactStore& artifacts() { return *artifacts_; }
+    [[nodiscard]] const ArtifactStore& artifacts() const { return *artifacts_; }
     // Schema document for GET /automation/v1/schema. UI thread.
     [[nodiscard]] JsonValue build_schema_document() const;
     [[nodiscard]] const JsonValue& instance_capabilities() const;
@@ -226,6 +235,7 @@ public:
 
 private:
     std::shared_ptr<Impl> impl_;
+    std::shared_ptr<ArtifactStore> artifacts_;
     std::atomic<bool> stopped_{false};
 
     [[nodiscard]] MethodRegistration wrap_token(std::uint64_t token);

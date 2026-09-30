@@ -84,6 +84,7 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     void tab_updated(WindowId window, TabId tab) override;
     void activation_changed(WindowId window, bool active) override;
     void shell_event(const Event& event) override;
+    void frame_presented(WindowId window, std::uint64_t serial) override;
     void animations_settled(WindowId window) override;
     void drag_started(WindowId window, TabId tab) override;
     void drag_finished(WindowId window, TabId tab) override;
@@ -92,10 +93,50 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     void emit_simple(std::string_view name, WindowId window, TabId tab, ContentId content,
                      std::uint64_t generation = 0);
 
+    // ---- trace (UI thread) ----
+    struct TraceSpan {
+        std::string name;
+        std::string kind;
+        double start = 0.0;
+        double end = 0.0;
+        std::string request_id;
+        WindowId window = 0;
+        JsonValue details;
+    };
+    bool trace_active = false;
+    std::size_t trace_max_spans = 512;
+    std::size_t trace_dropped = 0;
+    std::vector<TraceSpan> trace_spans;
+    void record_span(std::string name, std::string kind, double start, double end,
+                     std::string request_id = {}, WindowId window = 0,
+                     JsonValue details = JsonValue{});
+
+    // Records one span for the enclosing scope when a trace is active.
+    struct SpanScope {
+        Impl* impl;
+        std::string name;
+        std::string kind;
+        double start;
+        std::string request_id;
+        WindowId window;
+        SpanScope(Impl* owner, std::string span_name, std::string span_kind,
+                  std::string request, WindowId target)
+            : impl(owner), name(std::move(span_name)), kind(std::move(span_kind)),
+              start(owner->runtime.now()), request_id(std::move(request)), window(target) {}
+        ~SpanScope() {
+            if (impl->trace_active) {
+                impl->record_span(name, kind, start, impl->runtime.now(), request_id, window);
+            }
+        }
+        SpanScope(const SpanScope&) = delete;
+        SpanScope& operator=(const SpanScope&) = delete;
+    };
+
     // ---- domain registration (defined per translation unit) ----
     void register_window_tab_domains();
     void register_input_domain();
     void register_ui_domain();
+    void register_capture_and_trace_domains();
     void install_environment_hooks();
     void publish_capabilities();
 

@@ -18,6 +18,7 @@ add_library(tabengine_automation STATIC
     src/automation/json_value.cpp
     src/automation/errors.cpp
     src/automation/schema.cpp
+    src/automation/artifacts.cpp
     src/automation/runtime.cpp)
 target_include_directories(tabengine_automation PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -125,7 +126,8 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     add_library(tabengine_automation_shell STATIC
         src/automation/shell_bridge.cpp
         src/automation/shell_bridge_input.cpp
-        src/automation/shell_bridge_ui.cpp)
+        src/automation/shell_bridge_ui.cpp
+        src/automation/shell_bridge_capture.cpp)
     target_include_directories(tabengine_automation_shell PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)

@@ -130,6 +130,7 @@ ShellAutomationBridge::ShellAutomationBridge(Dependencies dependencies)
     impl_->register_window_tab_domains();
     impl_->register_input_domain();
     impl_->register_ui_domain();
+    impl_->register_capture_and_trace_domains();
     impl_->install_environment_hooks();
     impl_->publish_capabilities();
 }
@@ -289,6 +290,7 @@ void ShellAutomationBridge::Impl::publish_capabilities() {
     capabilities.set("windowActivate", true);
     capabilities.set("windowBounds", true);
     JsonValue capture = JsonValue::object();
+    capture.set("supported", renderer.supports_capture());
     capture.set("raster", renderer_backend == "raster");
     capture.set("d3d12", renderer_backend == "d3d12");
     capabilities.set("capture", std::move(capture));
