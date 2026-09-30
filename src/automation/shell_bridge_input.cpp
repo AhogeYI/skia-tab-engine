@@ -300,7 +300,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
     const std::string input{std::string(kGrantInput)};
 
     std::vector<MethodDescriptor> methods;
-    methods.push_back(descriptor("Input.click", "Synthesize a full click at a client position, or at a semantic node resolved through its authoritative owner (node ref or stableKey). Node clicks land inside the visible clip. With snapshotId and strict the click fails when the merged layout revision (shell plus providers) changed since the snapshot - for both node and stableKey mode. count=2 emits a double click whose second press carries clickCount 2.", true,
+    methods.push_back(descriptor("Input.click", "Synthesize a full click at a client position, or at a semantic node resolved through its authoritative owner (node ref or stableKey). Node clicks land inside the visible clip. With snapshotId and strict the click fails when the merged layout revision (shell plus providers) changed since the snapshot - for both node and stableKey mode. count=2 emits a double click whose second press carries clickCount 2 (releases carry none, matching native).", true,
         object_schema({
             {"windowId", string_property("Target window (decimal id string)")},
             {"x", integer_property("Client x in pixels")},
@@ -483,8 +483,14 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 down.button = button;
                 down.click_count = static_cast<int>(i);
                 shell.on_event(down);
-                Event up = down;
+                // Releases carry no click count, matching the native path
+                // (WM_*BUTTONDBLCLK marks only the second press).
+                Event up;
                 up.type = EventType::PointerUp;
+                up.window = window;
+                up.client = point;
+                up.screen = down.screen;
+                up.button = button;
                 shell.on_event(up);
             }
             session.pointer_window = window;
