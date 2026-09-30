@@ -67,6 +67,10 @@ if(WIN32)
         target_link_libraries(tabengine_wake_test PRIVATE tabengine_win32)
         add_test(NAME tabengine_wake_test COMMAND tabengine_wake_test)
 
+        add_executable(tabengine_win32_platform_test tests/win32_platform_test.cpp)
+        target_link_libraries(tabengine_win32_platform_test PRIVATE tabengine_win32)
+        add_test(NAME tabengine_win32_platform_test COMMAND tabengine_win32_platform_test)
+
         add_executable(tabengine_ime_test tests/ime_test.cpp)
         target_link_libraries(tabengine_ime_test PRIVATE tabengine_win32)
         add_test(NAME tabengine_ime_test COMMAND tabengine_ime_test)

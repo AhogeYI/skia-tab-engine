@@ -266,20 +266,13 @@ public:
     bool set_client_bounds(WindowId id, Rect screen_bounds) override {
         HWND hwnd = handle(id);
         if (!hwnd || screen_bounds.width <= 0 || screen_bounds.height <= 0) return false;
-        // Convert the desired client rectangle to a window rectangle with
-        // the current frame geometry; the custom frame keeps the margins
-        // but WM_NCCALCSIZE already excludes them, so the window rect and
-        // client rect differ only by the visible frame this style draws.
-        RECT desired{screen_bounds.x, screen_bounds.y,
-                     screen_bounds.x + screen_bounds.width,
-                     screen_bounds.y + screen_bounds.height};
-        const LONG style = static_cast<LONG>(GetWindowLongW(hwnd, GWL_STYLE));
-        const LONG ex_style = static_cast<LONG>(GetWindowLongW(hwnd, GWL_EXSTYLE));
-        if (!AdjustWindowRectExForDpi(&desired, style, FALSE, ex_style,
-                                      GetDpiForWindow(hwnd)))
-            return false;
-        return SetWindowPos(hwnd, nullptr, desired.left, desired.top,
-                            desired.right - desired.left, desired.bottom - desired.top,
+        // This platform's custom frame returns 0 from WM_NCCALCSIZE, so the
+        // client rectangle IS the window rectangle; applying the standard
+        // frame margins (AdjustWindowRectExForDpi) shifted real windows by
+        // the frame size (8x31 px at 96 dpi) away from the request. Place
+        // the window rect directly on the requested client rect.
+        return SetWindowPos(hwnd, nullptr, screen_bounds.x, screen_bounds.y,
+                            screen_bounds.width, screen_bounds.height,
                             SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
     }
 
