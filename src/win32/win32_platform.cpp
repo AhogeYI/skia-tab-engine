@@ -21,6 +21,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"TabEngineWindow";
 constexpr wchar_t kWakeClassName[] = L"TabEngineWake";
 constexpr UINT_PTR kAnimationTimer = 1;
+constexpr UINT_PTR kDelayedWakeTimer = 2;
 
 // UTF-16 composition strings (ImmGetCompositionStringW) to UTF-8 events;
 // surrogate pairs fold to one scalar value.
@@ -121,6 +122,14 @@ public:
         // Post, never send: a synchronous SendMessage would run the handler on
         // the waking thread instead of the pumping thread.
         if (wake_hwnd_) PostMessageW(wake_hwnd_, WM_APP, 0, 0);
+    }
+
+    void request_delayed_wake(double delay_seconds) override {
+        if (!wake_hwnd_) return;
+        const UINT milliseconds = static_cast<UINT>(
+            std::max(1.0, std::min(delay_seconds * 1000.0, 60'000.0)));
+        // SetTimer replaces any pending timer: delayed wakes coalesce.
+        SetTimer(wake_hwnd_, kDelayedWakeTimer, milliseconds, nullptr);
     }
 
     bool create(WindowId id, Rect bounds, std::string_view title, bool visible) override {
@@ -433,6 +442,11 @@ private:
         }
         auto* self = reinterpret_cast<Win32Platform*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (message == WM_APP) {
+            if (self && self->wake_) self->wake_();
+            return 0;
+        }
+        if (message == WM_TIMER && wp == kDelayedWakeTimer) {
+            KillTimer(hwnd, kDelayedWakeTimer);
             if (self && self->wake_) self->wake_();
             return 0;
         }

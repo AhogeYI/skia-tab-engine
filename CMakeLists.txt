@@ -119,6 +119,21 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     target_link_libraries(tabengine_skia PUBLIC
         d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 uuid dwrite usp10 gdi32)
 
+    # Tests and demos must run unattended: a launch with the bundled DLL
+    # missing from PATH pops a system loader dialog and blocks the whole
+    # suite, so deploy skia.dll beside every executable that links the
+    # shell whenever the shared Skia package carries one.
+    function(tabengine_deploy_skia_dll target)
+        if(EXISTS "${TABENGINE_SKIA_ROOT}/bin/skia.dll")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TABENGINE_SKIA_ROOT}/bin/skia.dll"
+                    "$<TARGET_FILE_DIR:${target}>/skia.dll"
+                VERBATIM)
+        endif()
+    endfunction()
+
+
     # Optional loopback HTTP transport: the only sockets in the engine.
     # Windows-only for now; other platforms report the transport as absent.
     add_library(tabengine_automation_transport STATIC
@@ -131,6 +146,17 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         PUBLIC tabengine_automation PRIVATE ws2_32)
     set_target_properties(tabengine_automation_transport PROPERTIES
         EXPORT_NAME AutomationTransport)
+
+    # In-repo build of the SDK-only example (the packaged copy uses
+    # examples/automation_demo/CMakeLists.txt with find_package).
+    add_executable(tabengine_automation_demo examples/automation_demo/main.cpp)
+    target_compile_definitions(tabengine_automation_demo PRIVATE UNICODE _UNICODE)
+    target_include_directories(tabengine_automation_demo PRIVATE "${TABENGINE_SKIA_ROOT}")
+    target_compile_definitions(tabengine_automation_demo PRIVATE
+        SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
+    target_link_libraries(tabengine_automation_demo PRIVATE
+        tabengine_automation_shell tabengine_automation_transport)
+    tabengine_deploy_skia_dll(tabengine_automation_demo)
 
     # Shell bridge: engine domains bound to one Shell (Window/Tab/Input/UI).
     # Windows-only because the logical-key table and input synthesis route
@@ -192,20 +218,6 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_link_libraries(tabengine_win32_demo PRIVATE tabengine_skia tabengine_win32)
         tabengine_deploy_skia_dll(tabengine_win32_demo)
     endif()
-
-    # Tests and demos must run unattended: a launch with the bundled DLL
-    # missing from PATH pops a system loader dialog and blocks the whole
-    # suite, so deploy skia.dll beside every executable that links the
-    # shell whenever the shared Skia package carries one.
-    function(tabengine_deploy_skia_dll target)
-        if(EXISTS "${TABENGINE_SKIA_ROOT}/bin/skia.dll")
-            add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${TABENGINE_SKIA_ROOT}/bin/skia.dll"
-                    "$<TARGET_FILE_DIR:${target}>/skia.dll"
-                VERBATIM)
-        endif()
-    endfunction()
 
     if(BUILD_TESTING)
         add_executable(tabengine_shell_test tests/shell_test.cpp)

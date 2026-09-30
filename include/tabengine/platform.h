@@ -181,6 +181,11 @@ public:
         (void)id;
         (void)result;
     }
+    // One-shot delayed UI wake, for hosts and subsystems that poll with a
+    // deadline (automation wait conditions). May coalesce: a newer request
+    // replaces the pending one. Default: unsupported; callers then only
+    // make progress on other activity.
+    virtual void request_delayed_wake(double delay_seconds) { (void)delay_seconds; }
 
     virtual int run() = 0;
 };
