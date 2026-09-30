@@ -26,6 +26,7 @@ revisions, and collect the same license bundle into
 | zlib | Zlib | `licenses/zlib/LICENSE.txt` |
 | D3D12 Memory Allocator | MIT | `licenses/d3d12allocator/LICENSE.txt`, `licenses/d3d12allocator/NOTICES.txt` |
 | SPIRV-Cross | Apache-2.0 or Khronos Free Use, dual-licensed | `licenses/spirv-cross/LICENSE.txt`, `licenses/spirv-cross/LicenseRef-KhronosFreeUse.txt` |
+| JSON for Modern C++ (nlohmann/json) 3.11.3 | MIT | Part of the TabEngine source tree (`third_party/json/LICENSE.MIT`) and redistributed inside `lib/tabengine_automation.lib`; the license text ships in every package as `THIRD_PARTY_NOTICES.md` references it. |
 
 All of these are permissive licenses compatible with TabEngine's Apache-2.0.
 Binary redistribution must retain the copyright, license, and disclaimer

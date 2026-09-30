@@ -181,13 +181,19 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         endif()
         include(CMakePackageConfigHelpers)
         install(TARGETS tabengine_core tabengine_win32 tabengine_skia
+            tabengine_automation tabengine_automation_shell
+            tabengine_automation_transport
             EXPORT TabEngineTargets ARCHIVE DESTINATION lib)
         install(EXPORT TabEngineTargets FILE TabEngineTargets.cmake
             NAMESPACE TabEngine:: DESTINATION lib/cmake/TabEngine)
         install(DIRECTORY include/ DESTINATION include)
         install(FILES SDK_PACKAGE_README.md DESTINATION . RENAME README.md)
-        install(FILES docs/SDK_USER_GUIDE.md docs/API_REFERENCE.md DESTINATION docs)
+        install(FILES docs/SDK_USER_GUIDE.md docs/API_REFERENCE.md
+            docs/AUTOMATION_GUIDE.md docs/AUTOMATION_API_REFERENCE.md DESTINATION docs)
         install(DIRECTORY examples/sdk_hello_tabs/ DESTINATION examples/sdk_hello_tabs)
+        install(DIRECTORY examples/automation_demo/ DESTINATION examples/automation_demo)
+        install(DIRECTORY tools/automation/ DESTINATION tools/automation
+            PATTERN "__pycache__" EXCLUDE)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/include" DESTINATION skia)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/modules" DESTINATION skia OPTIONAL)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/third_party" DESTINATION skia OPTIONAL)

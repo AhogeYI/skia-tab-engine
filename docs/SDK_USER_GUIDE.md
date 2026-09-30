@@ -27,7 +27,11 @@ tabengine-sdk-<version>-windows-x64-<config>/
   lib/*.lib
   lib/cmake/TabEngine/...
   docs/API_REFERENCE.md
+  docs/AUTOMATION_GUIDE.md      automation runtime and transport guide
+  docs/AUTOMATION_API_REFERENCE.md
   examples/sdk_hello_tabs/      complete application source
+  examples/automation_demo/     SDK-only automation example (--self-check)
+  tools/automation/te.py        standard-library Python CLI for the protocol
   licenses/                     Skia and component license texts
 ```
 
@@ -103,6 +107,40 @@ shows content ownership, a product-drawn button, event handling, text drawing,
 window startup, and a hidden smoke mode. See [API reference](API_REFERENCE.md)
 for callback timing, identifiers, events, and the available interfaces.
 
+## Automation and external tools
+
+The SDK can expose a running application to external tools: a control runtime
+inside the process, an optional loopback HTTP transport, a semantic tree that
+merges engine chrome with application-provided nodes, real input synthesis,
+frame-accurate screenshots, typed waits and bounded artifacts. See
+[AUTOMATION_GUIDE.md](AUTOMATION_GUIDE.md) and
+[AUTOMATION_API_REFERENCE.md](AUTOMATION_API_REFERENCE.md).
+
+`examples/automation_demo/` is a second, complete application that links only
+`TabEngine::SDK` + the automation targets, registers its own `app.example.*`
+methods and providers, and proves itself end to end:
+
+```powershell
+cmake -S examples/automation_demo -B "build/automation-$config" `
+  -G "Visual Studio 18 2026" -A x64 -DTABENGINE_SDK_ROOT="$(Get-Location)"
+cmake --build "build/automation-$config" --config $config
+./build/automation-$config/$config/tabengine_automation_demo.exe --self-check --raster
+```
+
+`--self-check` starts the transport on an OS-assigned port and performs real
+HTTP JSON-RPC calls against itself (info, semantic snapshot, semantic click,
+application state, condition wait, screenshot, artifact fetch with PNG
+validation). Without `--self-check` it opens a normal window; pass
+`--descriptor-out FILE --token-out FILE` to publish the connection descriptor
+and token for tools. The packaged `tools/automation/te.py` CLI drives any
+instance:
+
+```powershell
+$env:TABENGINE_TOKEN = Get-Content ./automation-token.txt -Raw
+python tools/automation/te.py --descriptor ./automation-descriptor.json windows
+python tools/automation/te.py --descriptor ./automation-descriptor.json snapshot 1
+```
+
 ## Package targets and deployment
 
 | CMake target | Use |
@@ -110,6 +148,9 @@ for callback timing, identifiers, events, and the available interfaces.
 | `TabEngine::SDK` | Normal application entry point: TabEngine shell, Win32 host, and matching Skia usage requirements. |
 | `TabEngine::Skia` | Imported `skia.dll`/`skia.lib` and matching headers, exported by the package. |
 | `TabEngine::FreeType` | Optional FreeType, libpng, and zlib libraries from the same build. |
+| `TabEngine::Automation` | Platform-neutral control runtime (protocol values, registry, queues, events, operations, artifacts). |
+| `TabEngine::AutomationShell` | Shell bridge: Window/Tab/Input/UI/Capture/Trace domains bound to one `Shell`. |
+| `TabEngine::AutomationTransport` | Optional loopback HTTP transport (sockets live only here). |
 | `TabEngine::Core`, `TabEngine::Win32`, `TabEngine::SkiaShell` | Individual library targets for advanced consumers. |
 
 The SDK uses static TabEngine `.lib` files plus a dynamic `skia.dll`. Deploy

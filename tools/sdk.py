@@ -261,22 +261,27 @@ def build_skia(config: str) -> Path:
     return package
 
 
-def sdk_stage(config: str) -> Path:
-    return ROOT / "build" / "sdk-stage" / config
+def sdk_stage(config: str, stage_root: Path | None = None) -> Path:
+    return (stage_root or ROOT / "build" / "sdk-stage") / config
 
 
-def package_sdk(config: str, skia_root: Path | None = None) -> Path:
+def package_sdk(config: str, skia_root: Path | None = None,
+                stage_root: Path | None = None, out_dir: Path | None = None) -> Path:
     skia_root = (skia_root or shared_package(config)).resolve()
     if not (skia_root / "bin" / "skia.dll").is_file():
         raise SystemExit(f"Shared Skia is missing: run build-skia --config {config}")
     build = ROOT / "build" / "sdk-build" / config
-    stage = sdk_stage(config)
-    reset_generated_dir(stage, ROOT / "build" / "sdk-stage")
+    stage = sdk_stage(config, stage_root)
+    reset_generated_dir(stage, stage_root or ROOT / "build" / "sdk-stage")
+    out_dir = (out_dir or ROOT / "dist").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
     run("cmake", "-S", str(ROOT), "-B", str(build), "-G", "Visual Studio 18 2026", "-A", "x64",
         "-DBUILD_TESTING=OFF", "-DTABENGINE_BUILD_SKIA=ON", "-DTABENGINE_INSTALL_SDK=ON",
         f"-DTABENGINE_SKIA_ROOT={skia_root}")
     run("cmake", "--build", str(build), "--config", config,
-        "--target", "tabengine_core", "tabengine_win32", "tabengine_skia")
+        "--target", "tabengine_core", "tabengine_win32", "tabengine_skia",
+        "tabengine_automation", "tabengine_automation_shell",
+        "tabengine_automation_transport")
     run_logged(ROOT / "build" / "logs" / f"sdk-install-{config.lower()}.log",
                "cmake", "--install", str(build), "--config", config,
                "--prefix", str(stage))
@@ -305,8 +310,7 @@ def package_sdk(config: str, skia_root: Path | None = None) -> Path:
         "files": {p.relative_to(stage).as_posix(): hash_file(p) for p in files},
     }
     (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    archive = ROOT / "dist" / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
-    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive = out_dir / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
         for path in sorted(stage.rglob("*")):
             if path.is_file():
@@ -336,10 +340,11 @@ def package_sdk(config: str, skia_root: Path | None = None) -> Path:
     return stage
 
 
-def verify(config: str) -> None:
+def verify(config: str, archive_path: Path | None = None) -> None:
     version_match = re.search(r"project\(TabEngine VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
     version = version_match.group(1) if version_match else "unknown"
-    archive = ROOT / "dist" / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
+    archive = archive_path or ROOT / "dist" / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
+    archive = archive.resolve()
     if not archive.is_file():
         raise SystemExit(f"SDK archive is missing: {archive}")
     # Extract outside the TabEngine checkout so the packaged example cannot
@@ -375,7 +380,11 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
     for relative in ("README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
                      "docs/SDK_USER_GUIDE.md",
                      "docs/API_REFERENCE.md", "examples/sdk_hello_tabs/CMakeLists.txt",
-                     "examples/sdk_hello_tabs/main.cpp"):
+                     "examples/sdk_hello_tabs/main.cpp",
+                     "docs/AUTOMATION_GUIDE.md", "docs/AUTOMATION_API_REFERENCE.md",
+                     "tools/automation/te.py",
+                     "examples/automation_demo/CMakeLists.txt",
+                     "examples/automation_demo/main.cpp"):
         if not (stage / relative).is_file():
             raise SystemExit(f"SDK developer resource is missing: {relative}")
     consumer_src = build.parent / "consumer-src"
@@ -400,25 +409,43 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
     run(str(example_build / config / "tabengine_hello_tabs.exe"), "--smoke", env=env)
     print("SDK packaged example passed")
 
+    # The packaged automation demo must build from the extracted SDK and
+    # then answer real protocol calls against itself (--self-check).
+    automation_source = stage / "examples" / "automation_demo"
+    automation_build = build.parent / "automation-demo-build"
+    run("cmake", "-S", str(automation_source), "-B", str(automation_build),
+        "-G", "Visual Studio 18 2026", "-A", "x64",
+        f"-DTABENGINE_SDK_ROOT={stage}")
+    run("cmake", "--build", str(automation_build), "--config", config)
+    run(str(automation_build / config / "tabengine_automation_demo.exe"),
+        "--self-check", "--raster", env=env)
+    print("SDK packaged automation demo passed")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("fetch", "build-skia", "package", "verify", "release"))
     parser.add_argument("--config", choices=("Debug", "Release"), default="Debug")
     parser.add_argument("--skia-root", type=Path, help="Prebuilt shared Skia package for package action")
+    parser.add_argument("--stage-root", type=Path,
+                        help="Override the SDK stage directory (keeps build/sdk-stage untouched)")
+    parser.add_argument("--out-dir", type=Path,
+                        help="Directory for the ZIP archives (default dist/)")
+    parser.add_argument("--archive", type=Path,
+                        help="Explicit ZIP for verify (default dist/<name>.zip)")
     args = parser.parse_args()
     if args.action == "fetch":
         fetch()
     elif args.action == "build-skia":
         build_skia(args.config)
     elif args.action == "package":
-        package_sdk(args.config, args.skia_root)
+        package_sdk(args.config, args.skia_root, args.stage_root, args.out_dir)
     elif args.action == "verify":
-        verify(args.config)
+        verify(args.config, args.archive)
     else:
         build_skia(args.config)
-        package_sdk(args.config)
-        verify(args.config)
+        package_sdk(args.config, stage_root=args.stage_root, out_dir=args.out_dir)
+        verify(args.config, args.archive)
 
 
 if __name__ == "__main__":
