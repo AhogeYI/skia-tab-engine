@@ -142,6 +142,15 @@ public:
     void end_native_move_loop(tabengine::WindowId) override {}
     bool begin_move_session(tabengine::WindowId) override { return true; }
     void end_move_session(tabengine::WindowId id, tabengine::MoveLoopResult result) override {
+        ++move_session_ends;
+        if (inject_competing_move && handler_) {
+            // Real input landing mid-session, before the MoveEnded arrives:
+            // exercises re-entrant dispatch from inside the drag driver.
+            tabengine::Event competing{tabengine::EventType::PointerMove};
+            competing.window = id;
+            competing.client = {5, 5};
+            handler_(competing);
+        }
         // Mirrors the real backend: completion arrives as a MoveEnded event.
         tabengine::Event ended{tabengine::EventType::MoveEnded};
         ended.window = id;
@@ -156,6 +165,8 @@ public:
     int run() override { return 0; }
 
     std::vector<tabengine::WindowId> activated_;
+    bool inject_competing_move = false;
+    int move_session_ends = 0;
 
 private:
     std::unordered_map<tabengine::WindowId, tabengine::Rect> windows_;
@@ -170,7 +181,17 @@ public:
     std::string window_title() override { return "Bridge Test"; }
     void tab_closed(tabengine::ContentId content) override { closed_.push_back(content); }
     void paint_body(tabengine::WindowId, tabengine::TabId, SkCanvas&, tabengine::Rect) override {}
-    void body_event(const tabengine::Event&, tabengine::Rect) override { ++body_events_; }
+    void body_event(const tabengine::Event& event, tabengine::Rect) override {
+        ++body_events_;
+        if (event.type == tabengine::EventType::PointerDown ||
+            event.type == tabengine::EventType::PointerUp) {
+            body_click_counts.push_back(
+                {event.type == tabengine::EventType::PointerDown ? "down" : "up",
+                 event.click_count});
+        }
+    }
+    // ("down"|"up", click_count) for body pointer events, in arrival order.
+    std::vector<std::pair<std::string, int>> body_click_counts;
     bool allow_close_window(tabengine::WindowId window) override {
         return veto_windows_.count(window) == 0;
     }
@@ -1177,6 +1198,68 @@ void test_snapshot_with_many_tabs() {
     CHECK(close_buttons >= 1);
 }
 
+// Real input can land while a stepwise tear-off move session is ending:
+// the drag driver must stay consistent under re-entrant dispatch and the
+// session must end exactly once (fake-level stand-in; the physical-mouse
+// variant remains a manual gate).
+void test_competing_input_during_stepwise_move() {
+    Harness harness;
+
+    // Find the active tab and drag it below the strip to tear it off.
+    harness.call(340,
+                 R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+    const JsonValue snapshot = harness.result(340);
+    int tab_x = -1;
+    int tab_y = 0;
+    for (const JsonValue& node : snapshot.find("nodes")->items()) {
+        if (node.find("role")->as_string() != "tab") continue;
+        const JsonValue& bounds = *node.find("bounds");
+        tab_x = static_cast<int>(bounds.find("x")->as_integer() +
+                                 bounds.find("width")->as_integer() / 2);
+        tab_y = static_cast<int>(bounds.find("y")->as_integer() + 10);
+    }
+    CHECK(tab_x > 0);
+
+    harness.platform.inject_competing_move = true;
+    const std::string drag =
+        R"({"jsonrpc":"2.0","id":2,"method":"Input.drag","params":{"windowId":"1","from":{"x":)" +
+        std::to_string(tab_x) + R"(,"y":)" + std::to_string(tab_y) +
+        R"(},"to":{"x":)" + std::to_string(tab_x) + R"(,"y":400}}})";
+    harness.call(341, drag);
+    harness.platform.inject_competing_move = false;
+    const JsonValue result = harness.result(341);
+    const std::string outcome = result.find("outcome")->as_string();
+    CHECK(outcome == "floated" || outcome == "released" || outcome == "lost");
+
+    // One end per torn window, never a burst of re-entrant completions.
+    CHECK(harness.platform.move_session_ends <= 1);
+
+    // The tab still exists exactly once across all windows.
+    std::size_t tabs_total = 0;
+    for (const tabengine::WindowId id : harness.shell.model().window_ids()) {
+        tabs_total += harness.shell.model().window(id)->tabs.size();
+    }
+    CHECK(tabs_total == 1);
+}
+
+// Synthetic double-click releases carry no click count (native: only the
+// second WM_*BUTTONDBLCLK press carries 2).
+void test_double_click_release_click_counts() {
+    Harness harness;
+    harness.client.body_click_counts.clear();
+    harness.call(350,
+                 R"({"jsonrpc":"2.0","id":1,"method":"Input.click","params":{"windowId":"1","x":300,"y":300,"count":2}})");
+    CHECK(harness.result(350).find("clicked")->as_integer() == 2);
+    const auto& counts = harness.client.body_click_counts;
+    CHECK(counts.size() == 4);
+    if (counts.size() == 4) {
+        CHECK(counts[0].first == "down" && counts[0].second == 1);
+        CHECK(counts[1].first == "up" && counts[1].second == 0);
+        CHECK(counts[2].first == "down" && counts[2].second == 2);
+        CHECK(counts[3].first == "up" && counts[3].second == 0);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1195,5 +1278,7 @@ int main() {
     test_hooks_revoked_on_bridge_destruction();
     test_http_input_sessions_end_to_end();
     test_snapshot_with_many_tabs();
+    test_competing_input_during_stepwise_move();
+    test_double_click_release_click_counts();
     return 0;
 }
