@@ -138,6 +138,8 @@ public:
     [[nodiscard]] std::uint64_t frame_serial(WindowId window) const;
     // True while finite tab/hover-card animations are still running.
     [[nodiscard]] bool has_active_animations(WindowId window) const;
+    // Client-area bounds of the body (below the tab strip) for this window.
+    [[nodiscard]] Rect body_bounds(WindowId window) const;
     // Declares that the client is running a pointer drag that started in the
     // body (the client captured the pointer). While active, pointer moves
     // over the tab strip are forwarded to IClient::body_event instead of
@@ -231,7 +233,6 @@ private:
     void request_destroy(WindowId window);
     void flush_destroy();
     void destroy_window_contents(WindowId window);
-    [[nodiscard]] Rect body_bounds(WindowId window) const;
     [[nodiscard]] StripLayout layout(WindowId window) const;
     [[nodiscard]] TabId tab_at(WindowId window, Point client) const;
     [[nodiscard]] bool over_strip(WindowId window, Point screen) const;

@@ -154,6 +154,10 @@ public:
     [[nodiscard]] ProviderRegistration register_semantic_provider(ISemanticProvider* provider);
     [[nodiscard]] ProviderRegistration register_activity_provider(IActivityProvider* provider);
     [[nodiscard]] ProviderRegistration register_diagnostics_provider(IDiagnosticProvider* provider);
+    // Registered providers in registration order (UI thread). The engine
+    // bridge reads these to compose merged semantic snapshots.
+    [[nodiscard]] const std::vector<ISemanticProvider*>& semantic_providers() const;
+    [[nodiscard]] const std::vector<IActivityProvider*>& activity_providers() const;
     // Non-owning; may be null to restore the default allow policy.
     void set_policy(IAutomationPolicy* policy);
     // Engine-side wait predicates; may be reset with a default-constructed

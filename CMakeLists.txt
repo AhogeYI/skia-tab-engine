@@ -118,6 +118,22 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     target_link_libraries(tabengine_skia PUBLIC
         d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 uuid dwrite usp10 gdi32)
 
+    # Shell bridge: engine domains bound to one Shell (Window/Tab/Input/UI).
+    # Windows-only because the logical-key table and input synthesis route
+    # through the Win32 backend; links the Skia shell because Shell lives
+    # there.
+    add_library(tabengine_automation_shell STATIC
+        src/automation/shell_bridge.cpp
+        src/automation/shell_bridge_input.cpp
+        src/automation/shell_bridge_ui.cpp)
+    target_include_directories(tabengine_automation_shell PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_definitions(tabengine_automation_shell PRIVATE UNICODE _UNICODE)
+    target_link_libraries(tabengine_automation_shell
+        PUBLIC tabengine_automation tabengine_skia tabengine_win32)
+    set_target_properties(tabengine_automation_shell PROPERTIES EXPORT_NAME AutomationShell)
+
     if(TABENGINE_INSTALL_SDK)
         if(NOT TARGET TabEngine::Skia)
             message(FATAL_ERROR "TABENGINE_INSTALL_SDK requires a shared Skia package with bin/skia.dll")

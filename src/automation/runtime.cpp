@@ -348,12 +348,9 @@ struct AutomationRuntime::Impl {
     std::uint64_t next_domain_token = 1;
 
     // ---- UI thread only ----
-    ISemanticProvider* semantic_provider = nullptr;
-    std::uint64_t semantic_token = 0;
-    IActivityProvider* activity_provider = nullptr;
-    std::uint64_t activity_token = 0;
+    std::vector<ISemanticProvider*> semantic_providers_;
+    std::vector<IActivityProvider*> activity_providers_;
     IDiagnosticProvider* diagnostics_provider = nullptr;
-    std::uint64_t diagnostics_token = 0;
     IAutomationPolicy* policy = nullptr;
     RuntimeEnvironmentHooks env;
 
@@ -582,9 +579,11 @@ struct AutomationRuntime::Impl {
         }
         document.set("errors", std::move(errors));
 
-        if (activity_provider) {
+        {
             JsonValue scopes = JsonValue::array();
-            for (std::string& scope : activity_provider->scopes()) scopes.push_back(scope);
+            for (IActivityProvider* candidate : activity_providers_) {
+                for (std::string& scope : candidate->scopes()) scopes.push_back(scope);
+            }
             document.set("activityScopes", std::move(scopes));
         }
         JsonValue budgets_value = JsonValue::object();
@@ -712,26 +711,20 @@ struct ProviderRegistration::Releaser {
     std::weak_ptr<AutomationRuntime::Impl> owner;
     std::uint64_t token = 0;
     std::uint64_t slot_id = 0;   // 0 semantic, 1 activity, 2 diagnostics
+    void* provider = nullptr;
     ~Releaser() {
         const std::shared_ptr<AutomationRuntime::Impl> impl = owner.lock();
         if (!impl) return;
         switch (slot_id) {
         case 0:
-            if (impl->semantic_token == token) {
-                impl->semantic_provider = nullptr;
-                impl->semantic_token = 0;
-            }
+            std::erase(impl->semantic_providers_, provider);
             break;
         case 1:
-            if (impl->activity_token == token) {
-                impl->activity_provider = nullptr;
-                impl->activity_token = 0;
-            }
+            std::erase(impl->activity_providers_, provider);
             break;
         default:
-            if (impl->diagnostics_token == token) {
+            if (impl->diagnostics_provider == provider) {
                 impl->diagnostics_provider = nullptr;
-                impl->diagnostics_token = 0;
             }
             break;
         }
@@ -877,23 +870,21 @@ MethodRegistration AutomationRuntime::register_engine_methods(
 
 ProviderRegistration AutomationRuntime::register_semantic_provider(ISemanticProvider* provider) {
     if (!provider) return {};
-    impl_->semantic_provider = provider;
-    impl_->semantic_token = impl_->next_domain_token++;
+    impl_->semantic_providers_.push_back(provider);
     auto releaser = std::make_shared<ProviderRegistration::Releaser>();
     releaser->owner = impl_->self_weak;
-    releaser->token = impl_->semantic_token;
     releaser->slot_id = 0;
+    releaser->provider = provider;
     return ProviderRegistration(std::move(releaser));
 }
 
 ProviderRegistration AutomationRuntime::register_activity_provider(IActivityProvider* provider) {
     if (!provider) return {};
-    impl_->activity_provider = provider;
-    impl_->activity_token = impl_->next_domain_token++;
+    impl_->activity_providers_.push_back(provider);
     auto releaser = std::make_shared<ProviderRegistration::Releaser>();
     releaser->owner = impl_->self_weak;
-    releaser->token = impl_->activity_token;
     releaser->slot_id = 1;
+    releaser->provider = provider;
     return ProviderRegistration(std::move(releaser));
 }
 
@@ -901,12 +892,19 @@ ProviderRegistration AutomationRuntime::register_diagnostics_provider(
     IDiagnosticProvider* provider) {
     if (!provider) return {};
     impl_->diagnostics_provider = provider;
-    impl_->diagnostics_token = impl_->next_domain_token++;
     auto releaser = std::make_shared<ProviderRegistration::Releaser>();
     releaser->owner = impl_->self_weak;
-    releaser->token = impl_->diagnostics_token;
     releaser->slot_id = 2;
+    releaser->provider = provider;
     return ProviderRegistration(std::move(releaser));
+}
+
+const std::vector<ISemanticProvider*>& AutomationRuntime::semantic_providers() const {
+    return impl_->semantic_providers_;
+}
+
+const std::vector<IActivityProvider*>& AutomationRuntime::activity_providers() const {
+    return impl_->activity_providers_;
 }
 
 void AutomationRuntime::set_policy(IAutomationPolicy* policy) { impl_->policy = policy; }
@@ -1670,23 +1668,30 @@ void AutomationRuntime::register_internal_domains() {
             record.operation = operation;
 
             if (condition == "activityQuiet") {
-                if (!impl_->activity_provider) {
-                    sink(MethodOutcome::failure(Error::unsupported(
-                        "no activity provider is registered for this instance")));
-                    return;
+                bool known = false;
+                for (IActivityProvider* candidate : impl_->activity_providers_) {
+                    ActivityReport report;
+                    if (candidate->activity(scope, report)) {
+                        known = true;
+                        break;
+                    }
                 }
-                ActivityReport report;
-                if (!impl_->activity_provider->activity(scope, report)) {
-                    sink(MethodOutcome::failure(
-                        Error::unsupported("unknown activity scope '" + scope + "'")));
+                if (!known) {
+                    sink(MethodOutcome::failure(impl_->activity_providers_.empty()
+                            ? Error::unsupported(
+                                  "no activity provider is registered for this instance")
+                            : Error::unsupported("unknown activity scope '" + scope + "'")));
                     return;
                 }
                 record.check = [this, scope](std::string& describe) {
-                    ActivityReport current;
-                    if (!impl_->activity_provider->activity(scope, current)) return false;
-                    describe = "scope '" + scope + "' has " +
-                               std::to_string(current.pending) + " pending tasks";
-                    return current.pending == 0;
+                    std::size_t total = 0;
+                    for (IActivityProvider* candidate : impl_->activity_providers_) {
+                        ActivityReport current;
+                        if (candidate->activity(scope, current)) total += current.pending;
+                    }
+                    describe = "scope '" + scope + "' has " + std::to_string(total) +
+                               " pending tasks";
+                    return total == 0;
                 };
             } else if (condition == "nodeAppears") {
                 if (!impl_->env.node_exists) {
