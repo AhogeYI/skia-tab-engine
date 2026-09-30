@@ -264,8 +264,9 @@ struct AutomationTransport::Impl {
 
     // Absolute-deadline readiness wait. Slices the wait so stop() is
     // honored promptly; false on deadline, stop or select failure.
-    [[nodiscard]] bool wait_socket(SOCKET socket, bool write, double deadline) const {
-        while (!stop_.load()) {
+    [[nodiscard]] bool wait_socket(SOCKET socket, bool write, double deadline,
+                                   bool stop_aborts = true) const {
+        while (!stop_aborts || !stop_.load()) {
             const double remain = deadline - monotonic();
             if (remain <= 0.0) return false;
             const double slice = std::min(remain, kIoSliceSeconds);
@@ -283,10 +284,10 @@ struct AutomationTransport::Impl {
     }
 
     [[nodiscard]] bool send_all_deadline(SOCKET socket, const char* data, std::size_t size,
-                                         double deadline) const {
+                                         double deadline, bool stop_aborts = true) const {
         std::size_t sent = 0;
         while (sent < size) {
-            if (!wait_socket(socket, /*write=*/true, deadline)) return false;
+            if (!wait_socket(socket, /*write=*/true, deadline, stop_aborts)) return false;
             const int result = send(socket, data + sent, static_cast<int>(size - sent), 0);
             if (result <= 0) return false;
             sent += static_cast<std::size_t>(result);
@@ -306,12 +307,15 @@ struct AutomationTransport::Impl {
         return true;
     }
 
+    // Response sends are stop-immune: a stop that races the send must not
+    // swallow the reply a client is waiting for (the io deadline still
+    // bounds the wait, so stop() joins stay bounded).
     bool send_simple(SOCKET socket, int status, std::string_view content_type,
                      const std::string& body, double deadline) {
         const std::string head = response_head(status, content_type, body.size());
-        return send_all_deadline(socket, head.data(), head.size(), deadline) &&
+        return send_all_deadline(socket, head.data(), head.size(), deadline, false) &&
                (body.empty() ||
-                send_all_deadline(socket, body.data(), body.size(), deadline));
+                send_all_deadline(socket, body.data(), body.size(), deadline, false));
     }
 
     // Session bookkeeping. Sweeps idle sessions and returns the logical
@@ -344,7 +348,8 @@ struct AutomationTransport::Impl {
     // deadline and cancellation; returns the envelope ("" on timeout/stop).
     // Shared by the RPC route and the host-mounted route handler's `call`.
     [[nodiscard]] std::string rpc_round_trip(std::uint64_t connection, std::string body,
-                                             double timeout_s);
+                                             double timeout_s,
+                                             const std::string& session = std::string{});
     static std::string url_path_only(const std::string& target) {
         const std::size_t query = target.find('?');
         return query == std::string::npos ? target : target.substr(0, query);
@@ -352,8 +357,17 @@ struct AutomationTransport::Impl {
 };
 
 std::string AutomationTransport::Impl::rpc_round_trip(std::uint64_t connection,
-                                                      std::string body, double timeout_s) {
+                                                      std::string body, double timeout_s,
+                                                      const std::string& session) {
     const double wait_s = timeout_s > 0.0 ? timeout_s : config.response_timeout_s;
+    if (!session.empty()) {
+        // The caller pinned a logical session: run on its identity.
+        std::lock_guard<std::mutex> guard(sessions_mutex);
+        const auto it = sessions.find(session);
+        if (it == sessions.end()) return {};
+        connection = it->second.connection;
+        it->second.last_used = monotonic();
+    }
     const std::uint64_t transport_request = next_transport_request.fetch_add(1);
     auto pending = std::make_shared<Pending>();
     {
@@ -405,6 +419,18 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
             self->bump([](Stats& stats) { --stats.active_connections; });
         }
     } active{this};
+    // Ephemeral connections (no session header) close on EVERY exit path
+    // after the body is read - including host-mounted routes that return
+    // early - so per-connection state never outlives the request.
+    bool close_connection_at_exit = false;
+    struct ConnectionCleanup {
+        Impl* self;
+        std::uint64_t* connection;
+        bool* armed;
+        ~ConnectionCleanup() {
+            if (*armed) self->runtime.connection_closed(*connection);
+        }
+    } cleanup{this, &connection, &close_connection_at_exit};
 
     const double io_deadline = monotonic() + config.io_timeout_s;
 
@@ -513,6 +539,42 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     const std::string path = url_path_only(target);
     const double respond_deadline = monotonic() + config.io_timeout_s;
 
+    // Logical connection first, so host-mounted routes and the engine's
+    // own run on the same identity: a session header binds this request
+    // to one stable connection; without one the connection is ephemeral
+    // and closed by the cleanup guard on every exit path. Auth already
+    // ran, so the id is only handed to callers holding the token.
+    if (!session_header.empty()) {
+        std::uint64_t logical = 0;
+        bool valid = false;
+        std::uint64_t expired_session = 0;
+        {
+            std::lock_guard<std::mutex> guard(sessions_mutex);
+            const auto it = sessions.find(session_header);
+            if (it != sessions.end() &&
+                (config.session_idle_timeout_s <= 0.0 ||
+                 monotonic() - it->second.last_used <= config.session_idle_timeout_s)) {
+                logical = it->second.connection;
+                it->second.last_used = monotonic();
+                valid = true;
+            } else if (it != sessions.end()) {
+                expired_session = it->second.connection;
+                sessions.erase(it);
+            }
+        }
+        if (expired_session != 0) runtime.connection_closed(expired_session);
+        if (!valid) {
+            bump([](Stats& stats) { ++stats.rejected; });
+            send_simple(socket, 404, "application/json",
+                        json_error_payload(404, "session not found or expired"),
+                        respond_deadline);
+            return;
+        }
+        connection = logical;
+    } else {
+        close_connection_at_exit = true;
+    }
+
     // Session management routes (auth already verified above).
     if (method == "POST" && path == "/automation/v1/session") {
         bool limit_reached = false;
@@ -615,8 +677,9 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
                 };
             const RouteReply host_reply = route_handler(
                 host_request,
-                [this, connection](std::string payload, double timeout_s) {
-                    return rpc_round_trip(connection, std::move(payload), timeout_s);
+                [this, connection](std::string payload, double timeout_s,
+                                    const std::string& session) {
+                    return rpc_round_trip(connection, std::move(payload), timeout_s, session);
                 },
                 artifact_reader);
             if (host_reply.status != 0) {
@@ -642,41 +705,6 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
         send_simple(socket, 413, "application/json",
                     json_error_payload(413, "body too large"), respond_deadline);
         return;
-    }
-
-    // Logical connection: a session header binds this request to one stable
-    // identity; without one the connection is ephemeral and closed right
-    // after the response. Auth already ran, so the id is only handed to
-    // callers holding the token.
-    bool ephemeral = session_header.empty();
-    if (!ephemeral) {
-        std::uint64_t logical = 0;
-        bool valid = false;
-        std::uint64_t expired_session = 0;
-        {
-            std::lock_guard<std::mutex> guard(sessions_mutex);
-            const auto it = sessions.find(session_header);
-            if (it != sessions.end() &&
-                (config.session_idle_timeout_s <= 0.0 ||
-                 monotonic() - it->second.last_used <= config.session_idle_timeout_s)) {
-                logical = it->second.connection;
-                it->second.last_used = monotonic();
-                valid = true;
-            } else if (it != sessions.end()) {
-                expired_session = it->second.connection;
-                sessions.erase(it);
-            }
-        }
-        if (expired_session != 0) runtime.connection_closed(expired_session);
-        if (!valid) {
-            bump([](Stats& stats) { ++stats.rejected; });
-            send_simple(socket, 404, "application/json",
-                        json_error_payload(404, "session not found or expired"),
-                        respond_deadline);
-            return;
-        }
-        connection = logical;
-        ephemeral = false;
     }
 
     bump([](Stats& stats) { ++stats.requests; });
@@ -740,9 +768,10 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
             with_etag.insert(with_etag.find("\r\n\r\n"), etag);
             const bool ok =
                 send_all_deadline(socket, with_etag.data(), with_etag.size(),
-                                  monotonic() + config.io_timeout_s) &&
+                                  monotonic() + config.io_timeout_s, false) &&
                 send_all_deadline(socket, reinterpret_cast<const char*>(entry.bytes.data()),
-                                  entry.bytes.size(), monotonic() + config.io_timeout_s);
+                                  entry.bytes.size(), monotonic() + config.io_timeout_s,
+                                  false);
             if (!ok) bump([](Stats& stats) { ++stats.timeouts; });
         }
     } else if (route == Route::Schema) {
@@ -763,10 +792,6 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
         bump([](Stats& stats) { ++stats.timeouts; });
     }
 
-    // Ephemeral requests end their logical connection here: queued work is
-    // cancelled and any input the request left held is released on the next
-    // UI drain. Session requests keep their identity across requests.
-    if (ephemeral) runtime.connection_closed(connection);
 }
 
 void AutomationTransport::Impl::accept_loop() {
@@ -994,6 +1019,14 @@ AutomationTransport::Stats AutomationTransport::stats() const {
 
 void AutomationTransport::set_route_handler(RouteHandler handler) {
     impl_->route_handler = std::move(handler);
+}
+
+std::string AutomationTransport::create_session() {
+    const std::string id = make_session_token();
+    std::lock_guard<std::mutex> guard(impl_->sessions_mutex);
+    impl_->sessions.emplace(id, Impl::LogicalSession{impl_->next_connection.fetch_add(1),
+                                                     impl_->monotonic()});
+    return id;
 }
 
 void AutomationTransport::set_auth_failure_callback(

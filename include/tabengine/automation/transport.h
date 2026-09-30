@@ -111,15 +111,22 @@ public:
         std::string content_type = "application/json";
         std::string body;
     };
-    using RpcCall = std::function<std::string(std::string payload, double timeout_s)>;
+    // `session` optionally names a logical session (see create_session);
+    // empty runs the request on the incoming connection's identity.
     // Reads artifact bytes by id (false when unknown or expired). Serves
     // host routes that relay binary results (e.g. screenshots captured
     // through Capture.screenshot).
     using ArtifactReader =
         std::function<bool(const std::string& id, std::string& bytes, std::string& media_type)>;
+    using RpcCall = std::function<std::string(
+        std::string payload, double timeout_s, const std::string& session)>;
     using RouteHandler =
         std::function<RouteReply(const RouteRequest&, const RpcCall&, const ArtifactReader&)>;
     void set_route_handler(RouteHandler handler);
+    // Mints a logical session (stable connection identity across
+    // requests) for host-side use such as legacy input gestures; returns
+    // its id. Thread-safe; idle expiry applies like any session.
+    [[nodiscard]] std::string create_session();
     // Audit hook for refused authentication: invoked on the worker thread
     // with the failure count and whether the lockout was armed. Never
     // receives the token. Install before start().

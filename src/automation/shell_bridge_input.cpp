@@ -262,6 +262,7 @@ void ShellAutomationBridge::Impl::release_session_input(InputSession& session) {
             Event up;
             up.type = EventType::PointerUp;
             up.window = session.pointer_window;
+            up.size = platform.client_size(session.pointer_window);
             up.client = session.last_client;
             up.screen = client_to_screen(session.pointer_window, session.last_client);
             up.button = bit == kPointerButtonLeft ? PointerButton::Left
@@ -276,12 +277,14 @@ void ShellAutomationBridge::Impl::release_session_input(InputSession& session) {
             up.type = EventType::KeyUp;
             up.key = vk;
             up.window = session.keyboard_window;
+            up.size = platform.client_size(session.keyboard_window);
             shell.on_event(up);
         }
         if (session.ime_open) {
             Event cancel;
             cancel.type = EventType::ImeCancel;
             cancel.window = session.keyboard_window;
+            cancel.size = platform.client_size(session.keyboard_window);
             shell.on_event(cancel);
         }
     }
@@ -478,6 +481,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event down;
                 down.type = EventType::PointerDown;
                 down.window = window;
+                down.size = platform.client_size(window);
                 down.client = point;
                 down.screen = client_to_screen(window, point);
                 down.button = button;
@@ -488,6 +492,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event up;
                 up.type = EventType::PointerUp;
                 up.window = window;
+                up.size = platform.client_size(window);
                 up.client = point;
                 up.screen = down.screen;
                 up.button = button;
@@ -540,6 +545,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event down;
                 down.type = EventType::PointerDown;
                 down.window = window;
+                down.size = platform.client_size(window);
                 down.client = point;
                 down.screen = client_to_screen(window, point);
                 down.button = button;
@@ -553,6 +559,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event move;
                 move.type = EventType::PointerMove;
                 move.window = window;
+                move.size = platform.client_size(window);
                 move.client = point;
                 move.screen = client_to_screen(window, point);
                 move.button = session.held_buttons & kPointerButtonLeft     ? PointerButton::Left
@@ -571,6 +578,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event up;
                 up.type = EventType::PointerUp;
                 up.window = window;
+                up.size = platform.client_size(window);
                 up.client = point;
                 up.screen = client_to_screen(window, point);
                 up.button = button;
@@ -640,6 +648,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             Event down;
             down.type = EventType::PointerDown;
             down.window = window;
+            down.size = platform.client_size(window);
             down.client = from;
             down.screen = from_screen;
             down.button = button;
@@ -710,6 +719,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                     Event move;
                     move.type = EventType::PointerMove;
                     move.window = window;
+                    move.size = platform.client_size(window);
                     move.client = target;
                     move.screen = client_to_screen(window, target);
                     move.button = button;
@@ -733,6 +743,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event up;
                 up.type = EventType::PointerUp;
                 up.window = window;
+                up.size = platform.client_size(window);
                 up.client = to;
                 up.screen = client_to_screen(window, to);
                 up.button = button;
@@ -781,6 +792,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event key;
                 key.type = type;
                 key.window = window;
+                key.size = platform.client_size(window);
                 key.key = vk;
                 key.ctrl = ctrl;
                 key.shift = shift;
@@ -827,6 +839,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
                 Event text;
                 text.type = EventType::TextInput;
                 text.window = window;
+                text.size = platform.client_size(window);
                 text.code_point = code_point;
                 shell.on_event(text);
             }
@@ -853,6 +866,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             Event wheel;
             wheel.type = EventType::PointerWheel;
             wheel.window = window;
+            wheel.size = platform.client_size(window);
             wheel.client = point;
             wheel.screen = client_to_screen(window, point);
             wheel.wheel = static_cast<int>(std::clamp<std::int64_t>(
@@ -892,6 +906,7 @@ void ShellAutomationBridge::Impl::register_input_domain() {
             Event composition;
             composition.type = type;
             composition.window = window;
+            composition.size = platform.client_size(window);
             if (const JsonValue* value = context.params.find("text");
                 value && value->is_string()) {
                 composition.ime_text = value->as_string();
