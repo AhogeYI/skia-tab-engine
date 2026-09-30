@@ -11,7 +11,24 @@
 //                                           request; the connection closes
 //                                           after its single response
 //   GET  /automation/v1/schema              the schema document
-//   GET  /automation/v1/artifacts/<id>      artifact bytes (expired = 404)
+//   GET  /automation/v1/artifacts/<id>      artifact bytes (expired = 404);
+//                                           authorized through the same
+//                                           Artifact.get request contract
+//                                           as the RPC route
+//   POST /automation/v1/session             begin a logical session
+//   DELETE /automation/v1/session           end it (with the session header)
+//
+// Sessions: HTTP requests are one-shot, but raw input (pointer down/move/up,
+// key down/up, IME segments) needs one stable identity across requests.
+// POST /automation/v1/session returns an opaque session id; sending it as
+// the X-TabEngine-Session header on later requests binds them to one
+// logical connection. Sessions are bound to the Bearer token (auth is
+// checked before the header is consulted), expire after an idle timeout,
+// and are capped by max_sessions. Ending one (explicitly, by idle expiry,
+// or on transport stop) cancels its in-flight requests and releases any
+// input the session holds on the UI thread. Requests without the header
+// are ephemeral: their logical connection is closed right after the single
+// response, releasing anything that request left held.
 
 #include "tabengine/automation/runtime.h"
 
@@ -28,10 +45,14 @@ struct TransportConfig {
     std::size_t header_bytes = 16 * 1024;
     std::size_t body_bytes = 256 * 1024;
     std::size_t max_connections = 8;
-    double io_timeout_s = 10.0;       // per socket read/write deadline
-    double response_timeout_s = 30.0; // max wait for a runtime response
+    double io_timeout_s = 10.0;       // absolute per-socket read/write deadline
+    double response_timeout_s = 30.0; // max wait for a runtime response;
+                                      // also caps the request deadline and
+                                      // is cancelled against on timeout
     std::size_t auth_failure_limit = 5;   // then refuse new connections
     double auth_lockout_s = 5.0;
+    double session_idle_timeout_s = 30.0; // logical session idle expiry
+    std::size_t max_sessions = 16;        // concurrent logical sessions
 };
 
 class AutomationTransport {
