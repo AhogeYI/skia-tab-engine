@@ -340,6 +340,10 @@ struct AutomationRuntime::Impl {
     std::function<void()> wake_callback;
     std::function<void(double)> deferred_wake_callback;
     std::uint64_t next_slot = 1;
+    // Slots settled on a worker thread; the next UI drain purges their
+    // condition records. Kept under state_mutex so settle() needs no
+    // second lock and no lock-order rules exist between the two.
+    std::vector<std::uint64_t> retired_slots;
 
     // ---- guarded by registry_mutex ----
     mutable std::mutex registry_mutex;
@@ -360,6 +364,9 @@ struct AutomationRuntime::Impl {
     std::uint64_t next_sequence = 1;
     std::uint64_t oldest_sequence = 0;
 
+    // The engine log ring is written from settling workers and read by
+    // Log.read on the UI thread; log_mutex covers both sides.
+    mutable std::mutex log_mutex;
     std::vector<ConditionRecord> conditions;
     std::deque<LogEntry> log_ring;
     std::size_t log_bytes = 0;
@@ -395,6 +402,9 @@ struct AutomationRuntime::Impl {
     }
 
     // Settle one executing request. Safe from any thread; idempotent.
+    // Conditions stay UI-thread-only: this path only marks the slot for
+    // retirement, and the next drain purges matching condition records -
+    // workers never mutate the conditions vector directly.
     void settle(std::uint64_t slot, MethodOutcome outcome) {
         PendingRequest entry;
         ResponseSink sink;
@@ -405,10 +415,8 @@ struct AutomationRuntime::Impl {
             entry = std::move(it->second);
             executing.erase(it);
             sink = response_sink;
+            retired_slots.push_back(slot);
         }
-        std::erase_if(conditions, [slot](const ConditionRecord& record) {
-            return record.slot == slot;
-        });
         if (outcome.ok) {
             log("debug", "completed " + entry.method, request_id_of(entry.id_echo),
                 entry.operation);
@@ -422,6 +430,20 @@ struct AutomationRuntime::Impl {
             ? build_result_payload(entry.id_echo, outcome.result)
             : build_error_payload(entry.id_echo, entry.has_id, outcome.error);
         sink(entry.connection, entry.transport_request, std::move(payload));
+    }
+
+    // UI thread: drop conditions whose slots settled on another thread.
+    void purge_retired_conditions() {
+        std::vector<std::uint64_t> retired;
+        {
+            std::lock_guard<std::mutex> guard(state_mutex);
+            if (retired_slots.empty()) return;
+            retired = std::move(retired_slots);
+            retired_slots.clear();
+        }
+        std::erase_if(conditions, [&retired](const ConditionRecord& record) {
+            return std::find(retired.begin(), retired.end(), record.slot) != retired.end();
+        });
     }
 
     void settle_deadline_or_cancel(std::uint64_t slot) {
@@ -453,6 +475,9 @@ struct AutomationRuntime::Impl {
         entry.request_id = std::move(request_id);
         entry.operation = operation;
         const std::size_t bytes = entry.message.size() + 96;
+        // Workers settle concurrently with Log.read on the UI thread; the
+        // ring, the sequence counter and the byte counter share one lock.
+        std::lock_guard<std::mutex> guard(log_mutex);
         log_bytes += bytes;
         log_ring.push_back(std::move(entry));
         while (log_ring.size() > kMaxLogItems || log_bytes > kMaxLogBytes) {
@@ -956,67 +981,77 @@ void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transpor
                              Error::make(ErrorCode::Cancelled, "runtime is shutting down")));
         return;
     }
-    // Registry lookup: method must exist; snapshot the descriptor.
+    // Registry lookup: method must exist; snapshot the descriptor. The
+    // rejection response is sent after every lock is released - respond_now
+    // takes state_mutex, so calling it while holding one is a self-deadlock
+    // (raised by the MSVC debug mutex as std::system_error, which would
+    // terminate the transport worker instead of answering the client).
     MethodDescriptor descriptor;
     std::uint64_t domain_token = 0;
+    bool method_missing = false;
     {
         std::lock_guard<std::mutex> guard(impl.registry_mutex);
         const auto name_it = impl.method_domain.find(method);
         if (name_it == impl.method_domain.end()) {
-            impl.respond_now(connection, transport_request, id_echo, has_id,
-                             MethodOutcome::failure(Error::make(
-                                 ErrorCode::MethodNotFound,
-                                 "method '" + method + "' is not registered")));
-            return;
-        }
-        domain_token = name_it->second;
-        const auto domain_it = impl.domains.find(domain_token);
-        if (domain_it != impl.domains.end()) {
-            for (const MethodDescriptor& candidate : domain_it->second.methods) {
-                if (candidate.name == method) {
-                    descriptor = candidate;
-                    break;
+            method_missing = true;
+        } else {
+            domain_token = name_it->second;
+            const auto domain_it = impl.domains.find(domain_token);
+            if (domain_it != impl.domains.end()) {
+                for (const MethodDescriptor& candidate : domain_it->second.methods) {
+                    if (candidate.name == method) {
+                        descriptor = candidate;
+                        break;
+                    }
                 }
             }
         }
     }
+    if (method_missing) {
+        impl.respond_now(connection, transport_request, id_echo, has_id,
+                         MethodOutcome::failure(Error::make(
+                             ErrorCode::MethodNotFound,
+                             "method '" + method + "' is not registered")));
+        return;
+    }
+    const char* overload_reason = nullptr;
     {
         std::lock_guard<std::mutex> guard(impl.state_mutex);
         if (impl.queue.size() >= impl.budgets.queue_limit) {
-            impl.respond_now(connection, transport_request, id_echo, has_id,
-                             MethodOutcome::failure(Error::make(
-                                 ErrorCode::Overloaded,
-                                 "runtime queue is at its limit; retry after a delay")));
-            return;
+            overload_reason = "runtime queue is at its limit; retry after a delay";
+        } else {
+            std::size_t inflight = 0;
+            for (const PendingRequest& pending : impl.queue) {
+                if (pending.connection == connection) ++inflight;
+            }
+            for (const auto& [slot, pending] : impl.executing) {
+                (void)slot;
+                if (pending.connection == connection) ++inflight;
+            }
+            if (inflight >= impl.budgets.inflight_per_session) {
+                overload_reason = "too many in-flight requests for this session";
+            } else {
+                PendingRequest entry;
+                entry.connection = connection;
+                entry.transport_request = transport_request;
+                entry.id_echo = id_echo;
+                entry.has_id = has_id;
+                entry.method = std::move(method);
+                entry.params = std::move(params);
+                entry.submitted = impl.clock();
+                entry.deadline = entry.submitted + descriptor.timeout_s;
+                entry.domain_token = domain_token;
+                entry.slot = impl.next_slot++;
+                entry.cancel_flag = std::make_shared<std::atomic<bool>>(false);
+                impl.queue.push_back(std::move(entry));
+            }
         }
-        std::size_t inflight = 0;
-        for (const PendingRequest& pending : impl.queue) {
-            if (pending.connection == connection) ++inflight;
-        }
-        for (const auto& [slot, pending] : impl.executing) {
-            (void)slot;
-            if (pending.connection == connection) ++inflight;
-        }
-        if (inflight >= impl.budgets.inflight_per_session) {
-            impl.respond_now(connection, transport_request, id_echo, has_id,
-                             MethodOutcome::failure(Error::make(
-                                 ErrorCode::Overloaded,
-                                 "too many in-flight requests for this session")));
-            return;
-        }
-        PendingRequest entry;
-        entry.connection = connection;
-        entry.transport_request = transport_request;
-        entry.id_echo = id_echo;
-        entry.has_id = has_id;
-        entry.method = std::move(method);
-        entry.params = std::move(params);
-        entry.submitted = impl.clock();
-        entry.deadline = entry.submitted + descriptor.timeout_s;
-        entry.domain_token = domain_token;
-        entry.slot = impl.next_slot++;
-        entry.cancel_flag = std::make_shared<std::atomic<bool>>(false);
-        impl.queue.push_back(std::move(entry));
+    }
+    if (overload_reason) {
+        impl.respond_now(connection, transport_request, id_echo, has_id,
+                         MethodOutcome::failure(
+                             Error::make(ErrorCode::Overloaded, overload_reason)));
+        return;
     }
     std::function<void()> wake;
     {
@@ -1150,6 +1185,10 @@ void AutomationRuntime::drain(double now) {
     if (stopped_.load(std::memory_order_acquire)) return;
     if (artifacts_) artifacts_->expire(now);
 
+    // Conditions are UI-thread-only: purge records whose slots settled on
+    // workers before evaluating anything.
+    impl.purge_retired_conditions();
+
     // 1. Sweep executing requests for deadline and cancellation.
     std::vector<std::uint64_t> expired;
     {
@@ -1197,26 +1236,31 @@ void AutomationRuntime::drain(double now) {
         // Snapshot the descriptor and handler.
         MethodHandler handler;
         MethodDescriptor descriptor;
+        bool provider_gone = false;
         {
             std::lock_guard<std::mutex> guard(impl.registry_mutex);
             const auto domain_it = impl.domains.find(entry.domain_token);
             if (domain_it == impl.domains.end()) {
-                impl.respond_now(entry.connection, entry.transport_request, entry.id_echo,
-                                 entry.has_id,
-                                 MethodOutcome::failure(Error::make(
-                                     ErrorCode::ProviderUnavailable,
-                                     "method provider was unregistered before execution")));
-                impl.log("info", "dropped (provider gone): " + entry.method,
-                         request_id_of(entry.id_echo));
-                continue;
-            }
-            handler = domain_it->second.handler;
-            for (const MethodDescriptor& candidate : domain_it->second.methods) {
-                if (candidate.name == entry.method) {
-                    descriptor = candidate;
-                    break;
+                provider_gone = true;
+            } else {
+                handler = domain_it->second.handler;
+                for (const MethodDescriptor& candidate : domain_it->second.methods) {
+                    if (candidate.name == entry.method) {
+                        descriptor = candidate;
+                        break;
+                    }
                 }
             }
+        }
+        if (provider_gone) {
+            impl.respond_now(entry.connection, entry.transport_request, entry.id_echo,
+                             entry.has_id,
+                             MethodOutcome::failure(Error::make(
+                                 ErrorCode::ProviderUnavailable,
+                                 "method provider was unregistered before execution")));
+            impl.log("info", "dropped (provider gone): " + entry.method,
+                     request_id_of(entry.id_echo));
+            continue;
         }
         // Session authorization and grants. The policy object belongs to
         // the UI thread and must not re-enter the runtime. The connection
@@ -1429,10 +1473,15 @@ void AutomationRuntime::register_internal_domains() {
             JsonValue list = JsonValue::array();
             std::uint64_t next = since;
             bool gap = false;
+            std::uint64_t oldest = 0;
             {
                 std::lock_guard<std::mutex> guard(impl_->event_mutex);
-                if (since > 0 && !impl_->events.empty() &&
-                    impl_->oldest_sequence > since + 1) {
+                // A fully trimmed ring still reports a gap when the cursor
+                // predates what was discarded; an empty list alone must
+                // never look like "already synchronized".
+                oldest = impl_->events.empty() ? impl_->next_sequence
+                                               : impl_->oldest_sequence;
+                if (since > 0 && oldest > since + 1) {
                     gap = true;
                 }
                 for (const AutomationEvent& event : impl_->events) {
@@ -1447,11 +1496,6 @@ void AutomationRuntime::register_internal_domains() {
             result.set("events", std::move(list));
             result.set("next", static_cast<std::int64_t>(next));
             result.set("gap", gap);
-            std::uint64_t oldest = 0;
-            {
-                std::lock_guard<std::mutex> guard(impl_->event_mutex);
-                oldest = impl_->events.empty() ? impl_->next_sequence : impl_->oldest_sequence;
-            }
             result.set("oldestAvailable", static_cast<std::int64_t>(oldest));
             sink(MethodOutcome::success(std::move(result)));
         };
@@ -1814,7 +1858,7 @@ void AutomationRuntime::register_internal_domains() {
                 JsonValue list = JsonValue::array();
                 std::uint64_t next = after;
                 {
-                    std::lock_guard<std::mutex> guard(impl_->event_mutex);
+                    std::lock_guard<std::mutex> guard(impl_->log_mutex);
                     for (const LogEntry& entry : impl_->log_ring) {
                         if (entry.sequence <= after) continue;
                         if (list.size() >= max) break;

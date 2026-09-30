@@ -8,9 +8,12 @@
 #include "check.h"
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -652,6 +655,199 @@ void test_wake_pump_two_subscribers() {
 
 } // namespace
 
+void test_event_gap_when_ring_fully_trimmed() {
+    RuntimeBudgets budgets;
+    budgets.event_items = 2;
+    budgets.event_bytes = 1;   // forces the ring to trim to empty
+    Clock clock;
+    AutomationRuntime runtime{budgets, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses responses;
+    responses.install(runtime);
+    for (int i = 0; i < 3; ++i) {
+        AutomationEvent event;
+        event.name = "tab.added";
+        event.window = i + 1;
+        runtime.emit_event(std::move(event));
+    }
+    // The ring is empty but the caller's cursor predates the discarded
+    // events: an empty list must still report a gap, never "synchronized".
+    receive(runtime, 110,
+            R"({"jsonrpc":"2.0","id":1,"method":"Event.poll","params":{"since":1}})");
+    runtime.drain(clock.now_value);
+    const JsonValue stale = responses.parsed(110);
+    CHECK(stale.find("result")->find("gap")->as_boolean() == true);
+    CHECK(stale.find("result")->find("events")->size() == 0);
+
+    // A cursor at the newest sequence is genuinely synchronized.
+    receive(runtime, 111,
+            R"({"jsonrpc":"2.0","id":2,"method":"Event.poll","params":{"since":3}})");
+    runtime.drain(clock.now_value);
+    const JsonValue fresh = responses.parsed(111);
+    CHECK(fresh.find("result")->find("gap")->as_boolean() == false);
+}
+
+// Adversarial concurrency: workers settle deferred requests (the transport
+// response path) while the UI thread drains, which iterates and purges
+// wait conditions. Exercises the retired-slot handoff; before that fix a
+// worker's erase raced the UI iteration of the same vector.
+void test_concurrent_settle_against_draining_waits() {
+    Clock clock;
+    RuntimeBudgets budgets;
+    budgets.inflight_per_session = 64;   // room for the waits + workers below
+    budgets.queue_limit = 512;
+    AutomationRuntime runtime{budgets, {"1.0", "0.1.0"}, std::ref(clock)};
+
+    std::mutex responses_mutex;
+    std::map<std::uint64_t, std::string> responses;
+    runtime.set_response_sink(
+        [&](std::uint64_t, std::uint64_t request, std::string payload) {
+            std::lock_guard<std::mutex> guard(responses_mutex);
+            responses.emplace(request, std::move(payload));
+        });
+
+    struct Provider : automation::IActivityProvider {
+        std::atomic<int> pending{1};
+        bool activity(std::string_view scope, automation::ActivityReport& out) override {
+            if (scope != "tasks") return false;
+            out.generation = 1;
+            out.pending = pending.load();
+            return true;
+        }
+        std::vector<std::string> scopes() const override { return {"tasks"}; }
+    } provider;
+    const auto provider_registration = runtime.register_activity_provider(&provider);
+    CHECK(provider_registration.valid());
+
+    std::mutex sinks_mutex;
+    std::vector<automation::CompletionSink> deferred;
+    std::vector<MethodDescriptor> methods;
+    MethodDescriptor descriptor = simple_method("app.race.work", "defers");
+    descriptor.timeout_s = 60.0;
+    methods.push_back(descriptor);
+    MethodRegistration registration = runtime.register_methods(
+        "app.race", std::move(methods),
+        [&](const RequestContext&, automation::CompletionSink sink) {
+            std::lock_guard<std::mutex> guard(sinks_mutex);
+            deferred.push_back(std::move(sink));
+        });
+    CHECK(registration.valid());
+
+    // Long-lived waits whose conditions the UI thread re-evaluates on every
+    // drain while the workers below settle concurrently.
+    for (int i = 0; i < 16; ++i) {
+        runtime.receive(7, 10'000 + static_cast<std::uint64_t>(i),
+                        R"({"jsonrpc":"2.0","id":"w)" + std::to_string(i) +
+                            R"(","method":"Wait.condition","params":{"condition":"activityQuiet","scope":"tasks","timeoutS":60}})");
+    }
+    runtime.drain(clock.now_value);
+
+    std::uint64_t next_request = 20'000;
+    for (int round = 0; round < 150; ++round) {
+        clock.now_value += 0.05;   // past each wait's poll interval
+        for (int i = 0; i < 4; ++i) {
+            runtime.receive(7, next_request++,
+                            R"({"jsonrpc":"2.0","id":"r","method":"app.race.work"})");
+        }
+        runtime.drain(clock.now_value);   // handlers capture sinks
+        std::vector<automation::CompletionSink> to_settle;
+        {
+            std::lock_guard<std::mutex> guard(sinks_mutex);
+            to_settle = std::move(deferred);
+            deferred.clear();
+        }
+        // The scope goes quiet mid-run so waits start settling through the
+        // same drains the workers race against.
+        if (round == 40) provider.pending.store(0);
+        std::thread worker([&to_settle] {
+            for (automation::CompletionSink& sink : to_settle) {
+                sink(MethodOutcome::success(JsonValue::object()));
+            }
+        });
+        runtime.drain(clock.now_value);
+        worker.join();
+    }
+    // Every wait settles satisfied and every work request got a response.
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        clock.now_value += 0.05;
+        runtime.drain(clock.now_value);
+        std::lock_guard<std::mutex> guard(responses_mutex);
+        if (responses.size() >= 16 + 150 * 4) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    int satisfied = 0;
+    int completed = 0;
+    {
+        std::lock_guard<std::mutex> guard(responses_mutex);
+        for (const auto& [request, payload] : responses) {
+            (void)request;
+            if (payload.find("\"satisfied\":true") != std::string::npos) ++satisfied;
+            if (payload.find("\"result\":{}") != std::string::npos) ++completed;
+        }
+        if (responses.size() != 16 + 150 * 4) {
+            std::fprintf(stderr, "responses=%zu satisfied=%d completed=%d\n",
+                         responses.size(), satisfied, completed);
+        }
+        CHECK(responses.size() == 16 + 150 * 4);
+    }
+    CHECK(satisfied == 16);
+    CHECK(completed == 150 * 4);
+}
+
+// Regression: the per-session and queue overload rejections must answer
+// with Overloaded instead of throwing from receive() (a self-deadlock in
+// the MSVC debug mutex used to terminate the calling worker thread, which
+// a client could trigger with 17 outstanding requests).
+void test_overload_answers_instead_of_terminating() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses responses;
+    responses.install(runtime);
+
+    std::vector<MethodDescriptor> methods;
+    methods.push_back(simple_method("app.hold.work", "defers forever"));
+    MethodRegistration registration = runtime.register_methods(
+        "app.hold", std::move(methods),
+        [](const RequestContext&, automation::CompletionSink) {
+            // never settles: the requests stay in flight
+        });
+    CHECK(registration.valid());
+
+    constexpr std::uint64_t kInflight = 16;
+    for (std::uint64_t i = 0; i < kInflight; ++i) {
+        receive(runtime, 500 + i,
+                R"({"jsonrpc":"2.0","id":"hold","method":"app.hold.work"})");
+    }
+    runtime.drain(clock.now_value);
+    for (std::uint64_t i = 0; i < kInflight; ++i) CHECK(!responses.has(500 + i));
+
+    receive(runtime, 599, R"({"jsonrpc":"2.0","id":"over","method":"app.hold.work"})");
+    CHECK(responses.has(599));   // answered synchronously, no crash
+    CHECK(responses.error_code(599) == 1009);   // Overloaded
+
+    // Queue limit: with the executor busy, more receives hit the cap and
+    // still answer cleanly. (`small` is a macro in the Windows RPC headers,
+    // so the budget object gets a neutral name.)
+    RuntimeBudgets tight;
+    tight.queue_limit = 2;
+    tight.inflight_per_session = 8;
+    AutomationRuntime limited{tight, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses limited_responses;
+    limited_responses.install(limited);
+    std::vector<MethodDescriptor> queued;
+    queued.push_back(simple_method("app.hold.work", "defers forever"));
+    MethodRegistration queued_registration = limited.register_methods(
+        "app.hold", std::move(queued),
+        [](const RequestContext&, automation::CompletionSink) {});
+    CHECK(queued_registration.valid());
+    for (std::uint64_t request = 0; request < 4; ++request) {
+        limited.receive(3, 700 + request,
+                        R"({"jsonrpc":"2.0","id":"q","method":"app.hold.work"})");
+    }
+    CHECK(limited_responses.has(702));   // the third sits at the queue cap
+    CHECK(limited_responses.error_code(702) == 1009 ||
+          limited_responses.has(703));
+}
+
 int main() {
     run_automation_values_tests();
     test_app_method_round_trip();
@@ -669,5 +865,8 @@ int main() {
     test_connection_close_and_shutdown();
     test_schema_document_lists_methods();
     test_wake_pump_two_subscribers();
+    test_event_gap_when_ring_fully_trimmed();
+    test_concurrent_settle_against_draining_waits();
+    test_overload_answers_instead_of_terminating();
     return 0;
 }
