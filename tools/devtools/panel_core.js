@@ -82,11 +82,11 @@ export function createRpcClient(transport, policy = {}) {
     if (sessionId) headers[SESSION_HEADER] = sessionId;
     return headers;
   };
-  const rawFetch = async (path, options) => {
+  const rawFetch = async (path, options, reader = fetchText, abortOnEpoch = true) => {
     const controller = new AbortController();
-    inFlight.add(controller);
+    if (abortOnEpoch) inFlight.add(controller);
     try {
-      return await fetchText(path, { ...options, signal: controller.signal });
+      return await reader(path, { ...options, signal: controller.signal });
     } finally {
       inFlight.delete(controller);
     }
@@ -113,12 +113,20 @@ export function createRpcClient(transport, policy = {}) {
     // identity across down/move/up). Existing sessions are replaced.
     async beginSession() {
       if (!token) return { ok: false, error: "no token" };
-      const response = await rawFetch(SESSION_PATH, {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + token },
-        body: "",
-        timeoutS: 10,
-      });
+      const attemptEpoch = epoch;
+      let response;
+      try {
+        response = await rawFetch(SESSION_PATH, {
+          method: "POST",
+          headers: { "Authorization": "Bearer " + token },
+          body: "",
+          timeoutS: 10,
+        });
+      } catch (_) {
+        return { ok: false, stale: epoch !== attemptEpoch,
+                 error: "session begin failed: network error" };
+      }
+      if (epoch !== attemptEpoch) return { ok: false, stale: true, error: "stale epoch" };
       if (response.status !== 200) {
         return { ok: false, error: "session begin failed: http " + response.status };
       }
@@ -136,13 +144,15 @@ export function createRpcClient(transport, policy = {}) {
       const id = sessionId;
       sessionId = "";
       try {
+        // This best-effort release owns a snapshot of the old credentials.
+        // Advancing the epoch must not abort the DELETE itself.
         await rawFetch(SESSION_PATH, {
           method: "DELETE",
           headers: { "Authorization": "Bearer " + token,
                      [SESSION_HEADER]: id },
           body: "",
           timeoutS: 5,
-        });
+        }, fetchText, false);
       } catch (_) {
         // A failed end is tolerable: idle expiry or transport stop also
         // releases held input server-side.
@@ -248,14 +258,15 @@ export function createRpcClient(transport, policy = {}) {
       const attemptEpoch = epoch;
       let response;
       try {
-        response = await fetchBytes(this.artifactUrl(id), {
+        response = await rawFetch(this.artifactUrl(id), {
           method: "GET",
           headers: sessionHeaders(),
           body: "",
           timeoutS: 15,
-        });
+        }, fetchBytes);
       } catch (_) {
-        return { ok: false, error: "artifact fetch failed: network error" };
+        return { ok: false, stale: epoch !== attemptEpoch,
+                 error: "artifact fetch failed: network error" };
       }
       if (epoch !== attemptEpoch) {
         return { ok: false, stale: true, error: "stale epoch" };
@@ -267,12 +278,20 @@ export function createRpcClient(transport, policy = {}) {
     },
     async fetchSchema() {
       if (!token) return { ok: false, error: "no token" };
-      const response = await rawFetch(SCHEMA_PATH, {
-        method: "GET",
-        headers: sessionHeaders(),
-        body: "",
-        timeoutS: 15,
-      });
+      const attemptEpoch = epoch;
+      let response;
+      try {
+        response = await rawFetch(SCHEMA_PATH, {
+          method: "GET",
+          headers: sessionHeaders(),
+          body: "",
+          timeoutS: 15,
+        });
+      } catch (_) {
+        return { ok: false, stale: epoch !== attemptEpoch,
+                 error: "schema fetch failed: network error" };
+      }
+      if (epoch !== attemptEpoch) return { ok: false, stale: true, error: "stale epoch" };
       if (response.status !== 200) {
         return { ok: false, error: "http " + response.status };
       }

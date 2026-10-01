@@ -133,12 +133,19 @@ async function connect() {
   // A new connection is a new epoch: in-flight results from the previous
   // session resolve as stale and are discarded, never rendered.
   rpc.newEpoch();
+  const connectionEpoch = rpc.epoch;
   stopPolling();
   stopTracking("connection changed");
+  gate.setAllowed(false);
+  $("allow-write").checked = false;
+  state.connected = false;
+  state.schema = null;
+  clearTargetData();
   activeToken = $("token").value;
   rpc.setToken(activeToken);
   if (!rpc.hasToken()) { toast("enter the control token first", true); return; }
   const info = await rpc.call("System.getInfo", {}, 10, { retryOnNetworkError: true });
+  if (rpc.epoch !== connectionEpoch) return;
   if (!info.ok) {
     state.connected = false;
     setStatus("auth failed", "bad");
@@ -148,7 +155,14 @@ async function connect() {
   // One logical session for the whole panel: raw input gestures keep one
   // connection identity across down/move/up, and disconnect releases it.
   const session = await rpc.beginSession();
+  if (rpc.epoch !== connectionEpoch) return;
+  if (!session.ok) {
+    setStatus("session failed", "bad");
+    toast(session.error, true);
+    return;
+  }
   const schema = await rpc.fetchSchema();
+  if (rpc.epoch !== connectionEpoch) return;
   if (!schema.ok) { toast("schema fetch failed: " + schema.error, true); return; }
   state.info = info.result;
   state.schema = schema.result;
@@ -691,6 +705,7 @@ $("method-filter").addEventListener("input", renderMethodList);
 $("schema-refresh").addEventListener("click", async () => {
   if (!state.connected) { toast("connect first", true); return; }
   const schema = await rpc.fetchSchema();
+  if (schema.stale) return;
   if (!schema.ok) { toast("schema refresh failed: " + schema.error, true); return; }
   state.schema = schema.result;
   renderMethodList();

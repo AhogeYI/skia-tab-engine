@@ -187,6 +187,58 @@ const OK = (result) => ({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id
   check(!outcome.ok && outcome.stale, "late old-epoch response is discarded");
 }
 
+// Session and schema responses must obey the same epoch fence as RPC.
+// Ignore cancellation in this transport to model a response already queued
+// when the operator disconnects.
+{
+  let deliver;
+  const client = createRpcClient({ fetchText: () => new Promise((resolve) => {
+    deliver = resolve;
+  }) });
+  client.setToken("token");
+  const pending = client.beginSession();
+  client.newEpoch();
+  deliver({ status: 200, body: '{"sessionId":"old-session"}' });
+  const result = await pending;
+  check(result.stale && !result.ok && client.sessionId === "",
+        "late session creation cannot restore a disconnected session");
+  const schema = client.fetchSchema();
+  client.newEpoch();
+  deliver({ status: 200, body: '{"methods":[{"name":"old"}]}' });
+  const oldSchema = await schema;
+  check(oldSchema.stale && !oldSchema.ok, "old schema cannot replace a new catalogue");
+}
+{
+  const client = createRpcClient({ fetchText: async () => { throw new Error("offline"); } });
+  client.setToken("token");
+  check(!(await client.beginSession()).ok, "session network errors are structured failures");
+  check(!(await client.fetchSchema()).ok, "schema network errors are structured failures");
+}
+{
+  let textSignal, binarySignal, deliver;
+  const client = createRpcClient({
+    fetchText: async (path, options) => {
+      textSignal = options.signal;
+      return { status: 200, body: '{"sessionId":"session"}' };
+    },
+    fetchBytes: (path, options) => {
+      binarySignal = options.signal;
+      return new Promise((resolve) => { deliver = resolve; });
+    },
+  });
+  client.setToken("token");
+  await client.beginSession();
+  const ending = client.endSession();
+  client.newEpoch();
+  await ending;
+  check(!textSignal.aborted, "disconnect does not cancel its session release request");
+  const artifact = client.fetchArtifact("image");
+  client.newEpoch();
+  check(binarySignal && binarySignal.aborted, "epoch advance aborts binary downloads too");
+  deliver({ status: 200, bytes: new ArrayBuffer(0) });
+  check((await artifact).stale, "late binary response belongs to the old epoch");
+}
+
 // ---- key-name normalization (real bridge table contract) ------------------
 {
   const enter = normalizeKeyName("Enter");
