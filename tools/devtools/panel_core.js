@@ -83,14 +83,18 @@ export function createRpcClient(transport, policy = {}) {
   // waiting on a late response stop at once (the response, if it arrives,
   // is discarded by the epoch check).
   const targetWaiters = new Set();
-  const waitTargetChange = (since) => new Promise((resolve) => {
-    const waiter = () => {
+  const waitTargetChange = (since) => {
+    let waiter;
+    const promise = new Promise((resolve) => {
+    waiter = () => {
       targetWaiters.delete(waiter);
       resolve(null);
     };
     waiter.since = since;
     targetWaiters.add(waiter);
-  });
+    });
+    return { promise, dispose: () => targetWaiters.delete(waiter) };
+  };
   const sessionHeaders = () => {
     const headers = { "Authorization": "Bearer " + token,
                       "Content-Type": "application/json" };
@@ -115,13 +119,17 @@ export function createRpcClient(transport, policy = {}) {
     get sessionId() { return sessionId; },
     get epoch() { return epoch; },
     get targetEpoch() { return targetEpoch; },
+    get pendingTargetWaits() { return targetWaiters.size; },
     // Advances the connection epoch: every in-flight call still running
     // under an older epoch resolves as stale and its result is discarded
     // by the caller, so a reconnecting panel never mixes results from two
     // instances. Also aborts the in-flight fetches themselves.
     newEpoch() {
       epoch += 1;
-      targetEpoch = 0; // a new connection starts a fresh target space
+      // Never reuse an old target generation: DOM flows also compare this
+      // value across reconnects, where resetting to zero creates an ABA.
+      targetEpoch += 1;
+      for (const waiter of [...targetWaiters]) waiter();
       sessionId = "";
       sessionBegin = null;
       for (const controller of inFlight) controller.abort();
@@ -149,7 +157,7 @@ export function createRpcClient(transport, policy = {}) {
     async beginSession() {
       if (!token) return { ok: false, error: "no token" };
       if (sessionBegin) return sessionBegin;
-      sessionBegin = (async () => {
+      const begin = (async () => {
         const attemptEpoch = epoch;
         let response;
         try {
@@ -175,10 +183,11 @@ export function createRpcClient(transport, policy = {}) {
         if (!sessionId) return { ok: false, error: "session begin returned no id" };
         return { ok: true, sessionId };
       })();
+      sessionBegin = begin;
       try {
-        return await sessionBegin;
+        return await begin;
       } finally {
-        sessionBegin = null;
+        if (sessionBegin === begin) sessionBegin = null;
       }
     },
     // Ends the session explicitly (disconnect): releases any held input.
@@ -189,22 +198,27 @@ export function createRpcClient(transport, policy = {}) {
       try {
         // This best-effort release owns a snapshot of the old credentials.
         // Advancing the epoch must not abort the DELETE itself.
-        await rawFetch(SESSION_PATH, {
+        const response = await rawFetch(SESSION_PATH, {
           method: "DELETE",
           headers: { "Authorization": "Bearer " + token,
                      [SESSION_HEADER]: id },
           body: "",
           timeoutS: 5,
         }, fetchText, false);
+        if (response.status !== 200 && response.status !== 404) {
+          return { ok: false, ended: false, error: "session release failed" };
+        }
       } catch (_) {
         // A failed end is tolerable: idle expiry or transport stop also
-        // releases held input server-side.
+        // releases held input server-side. A target transition must keep
+        // writes blocked until reconnect when this release is unconfirmed.
+        return { ok: false, ended: false, error: "session release failed: network error" };
       }
       return { ok: true, ended: true };
     },
     async call(method, params = {}, timeoutS = 10, options = {}) {
       const { retryOnNetworkError = false, sessionRetried = false } = options;
-      const decision = policy.authorize ? policy.authorize(method) : { permitted: true };
+      const decision = policy.authorize ? policy.authorize(method, options) : { permitted: true };
       if (!decision.permitted) {
         return { ok: false, error: { code: 0, message: decision.reason || "action refused" } };
       }
@@ -219,6 +233,8 @@ export function createRpcClient(transport, policy = {}) {
       });
       const attemptEpoch = epoch;
       const attemptTargetEpoch = targetEpoch;
+      const requestSessionId = sessionId;
+      const targetChange = waitTargetChange(attemptTargetEpoch);
       let response = null;
       try {
         // The target wait only breaks the await when the target moved; the
@@ -230,7 +246,7 @@ export function createRpcClient(transport, policy = {}) {
             body,
             timeoutS,
           }),
-          waitTargetChange(attemptTargetEpoch),
+          targetChange.promise,
         ]);
         if (response === null) {
           return { ok: false, stale: true,
@@ -259,6 +275,10 @@ export function createRpcClient(transport, policy = {}) {
         } else {
           return { ok: false, error: { code: 0, message: "network error" } };
         }
+      } finally {
+        // Successful calls must also release their unresolved race waiter;
+        // otherwise polling leaks one closure per request until a switch.
+        targetChange.dispose();
       }
       // The response belongs to a previous connection or target: discard it
       // - the caller already moved on (reconnect / window or tab switch).
@@ -280,8 +300,13 @@ export function createRpcClient(transport, policy = {}) {
       if (isSessionInvalid(response) && !sessionRetried) {
         const attemptEpoch = epoch;
         const attemptTargetEpoch = targetEpoch;
-        sessionId = "";
-        const begun = await this.beginSession();
+        // Another request may already have renewed this exact old session
+        // while its late 404 was in flight. Do not retire the new session.
+        let begun = { ok: true };
+        if (!sessionId || sessionId === requestSessionId) {
+          sessionId = "";
+          begun = await this.beginSession();
+        }
         if (begun.ok && epoch === attemptEpoch &&
             targetEpoch === attemptTargetEpoch) {
           return this.call(method, params, timeoutS,

@@ -479,6 +479,54 @@ const OK = (result) => ({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id
   check(snapshot.indexOf("0.3.0") >= 0, "ordinary data survives");
 }
 
+{
+  const client = createRpcClient(() => Promise.resolve({ status: 200, body: '{"result":{}}' }));
+  client.setToken("token");
+  for (let i = 0; i < 1000; ++i) await client.call("System.getInfo");
+  check(client.pendingTargetWaits === 0, "completed polling releases all target race waiters");
+  const before = client.targetEpoch;
+  client.newEpoch();
+  check(client.targetEpoch !== before, "reconnect never reuses a target generation");
+}
+
+// A retired session begin must not clear a new connection's single-flight
+// begin. Late 404 responses must reuse the session already renewed.
+{
+  const pending = [];
+  const client = createRpcClient(() => new Promise((resolve) => pending.push(resolve)));
+  client.setToken("token");
+  const oldBegin = client.beginSession();
+  client.newEpoch();
+  const newBegin = client.beginSession();
+  pending[0]({ status: 200, body: '{"sessionId":"old"}' });
+  await oldBegin;
+  const sharedBegin = client.beginSession();
+  check(pending.length === 2, "retired begin cannot clear current single-flight promise");
+  pending[1]({ status: 200, body: '{"sessionId":"new"}' });
+  if (pending.length > 2) pending[2]({ status: 200, body: '{"sessionId":"extra"}' });
+  await Promise.all([newBegin, sharedBegin]);
+}
+{
+  const pending = [];
+  let begins = 0;
+  const client = createRpcClient((path) => {
+    if (path === SESSION_PATH) return Promise.resolve({ status: 200,
+      body: JSON.stringify({ sessionId: "s" + (++begins) }) });
+    return new Promise((resolve) => pending.push(resolve));
+  });
+  client.setToken("token");
+  await client.beginSession();
+  const a = client.call("Input.click");
+  const b = client.call("Input.click");
+  pending[0]({ status: 404, body: "session not found" });
+  for (let i = 0; i < 12; ++i) await Promise.resolve();
+  pending[1]({ status: 404, body: "session not found" });
+  for (let i = 0; i < 12; ++i) await Promise.resolve();
+  check(begins === 2, "late expired response reuses the already renewed session");
+  for (let i = 2; i < pending.length; ++i) pending[i]({ status: 200, body: '{"result":{}}' });
+  await Promise.all([a, b]);
+}
+
 if (failures > 0) {
   console.error(failures + " panel core check(s) failed");
   process.exit(1);

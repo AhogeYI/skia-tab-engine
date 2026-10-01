@@ -268,7 +268,7 @@ def sdk_stage(config: str, stage_root: Path | None = None) -> Path:
 MCP_FILES = ("server.mjs", "selfcheck.mjs", "regression_test.mjs",
              "package.json", "package-lock.json", "README.md")
 DEVTOOLS_FILES = ("panel.html", "panel.css", "panel.js", "panel_core.js",
-                  "panel_test.mjs")
+                  "panel_test.mjs", "panel_dom_test.mjs")
 
 
 def source_provenance() -> dict:
@@ -525,6 +525,7 @@ def verify_packaged_tools(stage: Path, demo: Path, env: dict[str, str]) -> None:
     if node is None:
         raise SystemExit("node is required to verify the packaged tools")
     run(node, str(stage / "tools" / "devtools" / "panel_test.mjs"))
+    run(node, str(stage / "tools" / "devtools" / "panel_dom_test.mjs"))
     print("SDK packaged devtools panel logic passed")
 
     spaced = stage.parent / "mcp tool dir"

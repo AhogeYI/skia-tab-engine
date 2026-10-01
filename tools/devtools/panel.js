@@ -74,8 +74,12 @@ function fetchBytes(path, options) {
 
 const gate = createMutationGate();
 const rpc = createRpcClient({ fetchText, fetchBytes }, {
-  authorize(method) {
+  authorize(method, options = {}) {
     const descriptor = state.schema && state.schema.methods.find((item) => item.name === method);
+    if (state.targetChanging && (descriptor ? descriptor.mutating : true) &&
+        !(method === "Tab.select" && options.targetTransition === rpc.targetEpoch)) {
+      return { permitted: false, reason: "target transition in progress; reconnect if release failed" };
+    }
     return gate.check(descriptor || { mutating: method !== "System.getInfo" });
   },
 });
@@ -84,6 +88,7 @@ const logs = createLogCursor();
 let activeToken = "";
 const state = {
   info: null, schema: null, connected: false,
+  targetChanging: false,
   windows: [], windowId: null, scale: 1,
   snapshot: null, selectedNode: null,
   shot: null, // {meta, bytes, objectUrl}
@@ -118,6 +123,11 @@ function clearTargetData() {
   $("shot").removeAttribute("src");
   $("shot-empty").hidden = false;
   $("shot-meta").textContent = "";
+  $("method-form").replaceChildren();
+  $("method-result").textContent = "";
+  $("trace-status").textContent = "";
+  logs.reset();
+  $("logs-list").replaceChildren();
   sizeOverlay();
 }
 function idOf(window) { return String(window.windowId ?? window.id); }
@@ -129,11 +139,14 @@ function setStatus(text, cls) {
   node.className = "status " + (cls || "");
 }
 async function connect() {
+  // Release with the previous endpoint and credentials before retargeting.
+  rpc.endSession();
   endpoint = $("endpoint").value.trim() || location.origin;
   // A new connection is a new epoch: in-flight results from the previous
   // session resolve as stale and are discarded, never rendered.
   rpc.newEpoch();
   const connectionEpoch = rpc.epoch;
+  state.targetChanging = false;
   stopPolling();
   stopTracking("connection changed");
   gate.setAllowed(false);
@@ -196,6 +209,7 @@ function disconnect() {
   $("token").value = "";
   activeToken = "";
   state.connected = false;
+  state.targetChanging = false;
   state.info = null; state.schema = null;
   clearTargetData();
   setStatus("disconnected");
@@ -232,6 +246,11 @@ async function refreshWindows() {
   const keep = state.windows.some((w) => idOf(w) === String(state.windowId));
   if (!keep) {
     const first = state.windows[0];
+    if (state.windowId !== null) {
+      await switchWindow(first ? idOf(first) : null);
+      select.value = first ? idOf(first) : "";
+      return;
+    }
     state.windowId = first ? idOf(first) : null;
     state.scale = first && first.scale ? Number(first.scale) : 1;
     if (first) select.value = idOf(first);
@@ -287,34 +306,53 @@ async function refreshTree() {
     (result.result.truncated ? " · truncated" : "");
   renderTree();
 }
+async function changeTargetSession() {
+  const connectionEpoch = rpc.epoch;
+  const targetEpoch = rpc.newTargetEpoch();
+  state.targetChanging = true;
+  stopTracking("target changed");
+  clearTargetData();
+  const current = () => rpc.epoch === connectionEpoch && rpc.targetEpoch === targetEpoch;
+  const released = await rpc.endSession();
+  if (!current()) return null;
+  if (!released.ok) { toast("input release failed; reconnect before writing", true); return null; }
+  const begun = await rpc.beginSession();
+  if (!current()) return null;
+  if (!begun.ok) { toast("input session unavailable; reconnect before writing", true); return null; }
+  return { current, targetEpoch };
+}
 async function switchWindow(windowId) {
   if (String(state.windowId) === String(windowId)) return;
-  clearTargetData(); // old window's tree/shot/selection never leak
   // A target change advances the target generation: in-flight results from
   // the old window/tab resolve stale at their await points and every
   // multi-step flow stops instead of writing into the new target.
-  rpc.newTargetEpoch();
-  stopTracking("target changed");
   state.windowId = windowId;
   const window = state.windows.find((w) => idOf(w) === String(windowId));
   state.scale = window && window.scale ? Number(window.scale) : 1;
+  const changed = await changeTargetSession();
+  if (!changed) return;
+  state.targetChanging = false;
   await refreshTabs();
+  if (!changed.current()) return;
   await refreshTree();
 }
 async function switchTab(tabId) {
   // Selecting a tab is a mutating engine method: the write gate applies.
   const gateCheck = gate.check({ mutating: true });
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); await refreshTabs(); return; }
+  const windowId = state.windowId;
+  const changed = await changeTargetSession();
+  if (!changed) return;
   const result = await rpc.call("Tab.select",
-    { windowId: state.windowId, tabId: String(tabId) });
+    { windowId, tabId: String(tabId) }, 10,
+    { targetTransition: changed.targetEpoch });
+  if (!changed.current() || result.stale) return;
+  state.targetChanging = false;
   if (!result.ok) {
     toast("tab select failed: " + result.error.message, true);
     await refreshTabs();
     return;
   }
-  clearTargetData();
-  rpc.newTargetEpoch();
-  stopTracking("target changed");
   await refreshTree();
 }
 function nodeTitle(node) {
@@ -419,13 +457,15 @@ async function capture() {
   const windowId = state.windowId;
   const result = await rpc.call("Capture.screenshot",
     { windowId, frame: "fresh" });
+  if (result.stale || rpc.targetEpoch !== targetEpoch) return;
   if (!result.ok) { toast("capture failed: " + result.error.message, true); return; }
   const artifact = await rpc.fetchArtifact(result.result.artifactId);
+  if (artifact.stale || rpc.targetEpoch !== targetEpoch) return;
   if (!artifact.ok) { toast(artifact.error, true); return; }
-  if (artifact.stale || rpc.targetEpoch !== targetEpoch) return; // moved mid-capture
   if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
   state.shot = {
     meta: result.result,
+    targetEpoch, windowId,
     objectUrl: URL.createObjectURL(new Blob([artifact.bytes], { type: "image/png" })),
   };
   const img = $("shot");
@@ -457,6 +497,7 @@ function drawOverlay() {
 }
 async function imageClick(event) {
   if (!state.shot) return;
+  if (state.shot.targetEpoch !== rpc.targetEpoch || state.shot.windowId !== state.windowId) return;
   // The click belongs to the shot's target: capture the generation and
   // window here so a target switch between hover and dispatch never sends
   // window A's coordinates to window B.
