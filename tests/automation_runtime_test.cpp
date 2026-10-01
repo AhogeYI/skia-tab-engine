@@ -436,6 +436,58 @@ void test_operations() {
     CHECK(responses.error_code(75) == 1012);   // OperationNotFound
 }
 
+void test_product_operation_cancel_bridge() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
+    Responses responses;
+    responses.install(runtime);
+
+    // Product-registered work owns its cancellation: Operation.cancel
+    // consults the bridge, a decline keeps the operation running, and an
+    // accepted cancel settles it without pretending side effects rolled
+    // back.
+    int asked = 0;
+    bool accept = false;
+    const std::uint64_t operation = runtime.start_operation(
+        "app.work.copy", [&] { ++asked; return accept; });
+
+    receive(runtime, 80,
+            (R"({"jsonrpc":"2.0","id":1,"method":"Operation.cancel","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})")
+                .c_str());
+    runtime.drain(clock.now_value);
+    CHECK(asked == 1);
+    const JsonValue declined = *responses.parsed(80).find("result");
+    CHECK(declined.find("state")->as_string() == "running");
+    CHECK(!declined.find("cancelled")->as_boolean());
+
+    // A declined cancel leaves the operation queryable and running.
+    receive(runtime, 81,
+            (R"({"jsonrpc":"2.0","id":2,"method":"Operation.get","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})")
+                .c_str());
+    runtime.drain(clock.now_value);
+    CHECK(responses.parsed(81).find("result")->find("state")->as_string() == "running");
+
+    accept = true;
+    receive(runtime, 82,
+            (R"({"jsonrpc":"2.0","id":3,"method":"Operation.cancel","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})")
+                .c_str());
+    runtime.drain(clock.now_value);
+    CHECK(asked == 2);
+    const JsonValue cancelled = *responses.parsed(82).find("result");
+    CHECK(cancelled.find("state")->as_string() == "cancelled");
+    CHECK(cancelled.find("cancelled")->as_boolean());
+
+    receive(runtime, 83,
+            (R"({"jsonrpc":"2.0","id":4,"method":"Operation.get","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})")
+                .c_str());
+    runtime.drain(clock.now_value);
+    CHECK(responses.parsed(83).find("result")->find("state")->as_string() == "cancelled");
+}
+
 void test_activity_wait() {
     Clock clock;
     AutomationRuntime runtime{{}, {"1.0", "0.1.0"}, std::ref(clock)};
@@ -1172,6 +1224,7 @@ int main() {
     test_queued_deadline_never_executes();
     test_executing_deadline_and_deferred_success();
     test_operations();
+    test_product_operation_cancel_bridge();
     test_activity_wait();
     test_wait_unsupported_without_provider();
     test_events_and_gap();

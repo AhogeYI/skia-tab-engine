@@ -285,6 +285,10 @@ struct PendingRequest {
 struct OperationRecord {
     OperationInfo info;
     std::shared_ptr<std::atomic<bool>> cancel_flag;
+    // Product-registered work (start_operation with a cancel bridge):
+    // Operation.cancel consults it first; a declined bridge keeps the
+    // operation Running and the response says so.
+    std::function<bool()> cooperative_cancel;
     std::vector<std::function<void(const OperationInfo&)>> waiters;
 };
 
@@ -1438,6 +1442,26 @@ std::uint64_t AutomationRuntime::start_operation(std::string method,
     return id;
 }
 
+std::uint64_t AutomationRuntime::start_operation(std::string method,
+                                                 std::function<bool()> cooperative_cancel) {
+    Impl& impl = *impl_;
+    const std::uint64_t id = impl.next_operation++;
+    OperationRecord record;
+    record.info.id = id;
+    record.info.method = std::move(method);
+    record.info.started = impl.clock();
+    record.cooperative_cancel = std::move(cooperative_cancel);
+    impl.operations.emplace(id, std::move(record));
+    AutomationEvent event;
+    event.name = std::string(event_names::kOperationUpdated);
+    event.operation = id;
+    JsonValue details = JsonValue::object();
+    details.set("state", "running");
+    event.details = std::move(details);
+    impl.append_event(std::move(event));
+    return id;
+}
+
 void AutomationRuntime::finish_operation(std::uint64_t id, OperationState state, JsonValue result,
                                          Error error) {
     Impl& impl = *impl_;
@@ -1978,6 +2002,30 @@ void AutomationRuntime::register_internal_domains() {
                 return;
             }
             const std::string method = record.info.method;
+            // Product-registered work owns its cancellation: the bridge
+            // decides, and a decline keeps the operation running (already
+            // stopping or not cancellable - reported honestly, never a
+            // silent success).
+            if (record.cooperative_cancel) {
+                const bool cancelled_now = record.cooperative_cancel();
+                JsonValue result = JsonValue::object();
+                result.set("operationId", id_to_wire(id));
+                result.set("method", method);
+                result.set("state", cancelled_now ? "cancelled" : "running");
+                result.set("cancelled", cancelled_now);
+                result.set("note", cancelled_now
+                    ? "the operation owner accepted cancellation; side effects "
+                      "already executed are not rolled back"
+                    : "the operation owner declined cancellation (already stopping "
+                      "or not cancellable)");
+                if (cancelled_now) {
+                    finish_operation(id, OperationState::Cancelled, JsonValue{},
+                                     Error::make(ErrorCode::Cancelled,
+                                                 "cancelled via Operation.cancel"));
+                }
+                sink(MethodOutcome::success(std::move(result)));
+                return;
+            }
             if (record.cancel_flag) record.cancel_flag->store(true);
             finish_operation(id, OperationState::Cancelled, JsonValue{},
                              Error::make(ErrorCode::Cancelled, "cancelled via Operation.cancel"));

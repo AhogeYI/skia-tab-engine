@@ -308,6 +308,13 @@ public:
     // later through finish_operation.
     [[nodiscard]] std::uint64_t start_operation(std::string method,
                                                 const RequestContext& context);
+    // Product-registered work (file operations, scans): same lifecycle and
+    // query/wait surface, plus a cooperative cancel bridge consulted by
+    // Operation.cancel. The bridge runs on the UI thread and returns
+    // whether cancellation was accepted; a decline keeps the operation
+    // Running and the cancel response says so instead of lying.
+    [[nodiscard]] std::uint64_t start_operation(
+        std::string method, std::function<bool()> cooperative_cancel);
     // Finish an operation. `result` is used on success; `error` on failure.
     void finish_operation(std::uint64_t id, OperationState state, JsonValue result, Error error);
     [[nodiscard]] bool get_operation(std::uint64_t id, OperationInfo& out) const;
