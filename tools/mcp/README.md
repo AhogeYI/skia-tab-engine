@@ -4,11 +4,20 @@ Exposes a running TabEngine automation surface (the engine's own host or a
 product embedding it) as [Model Context Protocol](https://modelcontextprotocol.io)
 tools over stdio, for AI clients that speak MCP.
 
+From a TabEngine SDK package the adapter is ready to run - production
+dependencies are vendored inside `tools/mcp/node_modules`, no install step:
+
 ```powershell
-npm install                              # pinned SDK, lockfile committed
 $env:TABENGINE_ENDPOINT = "http://127.0.0.1:53123"
 $env:TABENGINE_TOKEN = "<token>"
-node server.mjs                          # or: node tools/mcp/server.mjs from the repo root
+node <sdk>\tools\mcp\server.mjs
+```
+
+From a source checkout, install the pinned dependencies first:
+
+```powershell
+npm ci                                   # pinned SDK, lockfile committed
+node tools/mcp/server.mjs
 ```
 
 ## Connection modes

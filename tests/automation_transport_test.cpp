@@ -150,6 +150,25 @@ void test_rpc_round_trip_and_auth() {
     });
     CHECK(forbidden.status == 403);
 
+    // Browsers send Origin as a full URL even for same-origin module
+    // fetches; a loopback Origin in URL form must pass while a foreign
+    // origin (DNS-rebinding posture) must not.
+    {
+        std::string request = rpc_request(token, body);
+        request.insert(request.find("\r\n\r\n"),
+                       "\r\nOrigin: http://127.0.0.1:" + std::to_string(harness.transport.port()));
+        const HttpResponse same_origin = harness.round_trip([&] {
+            return http_request(harness.transport.port(), request);
+        });
+        CHECK(same_origin.status == 200);
+        std::string foreign = rpc_request(token, body);
+        foreign.insert(foreign.find("\r\n\r\n"), "\r\nOrigin: http://evil.example");
+        const HttpResponse foreign_origin = harness.round_trip([&] {
+            return http_request(harness.transport.port(), foreign);
+        });
+        CHECK(foreign_origin.status == 403);
+    }
+
     // Invalid JSON still gets a JSON-RPC parse error with a null id.
     const HttpResponse malformed = harness.round_trip([&] {
         return http_request(harness.transport.port(), rpc_request(token, "not json"));

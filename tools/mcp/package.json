@@ -1,8 +1,8 @@
 {
   "name": "tabengine-mcp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Model Context Protocol adapter for TabEngine automation surfaces",
+  "description": "Model Context Protocol adapter for TabEngine automation surfaces (ships inside the TabEngine SDK; private means no npm publish)",
   "type": "module",
   "bin": {
     "tabengine-mcp": "./server.mjs"

@@ -79,7 +79,7 @@ try {
   const initialized = await client.request("initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
-    clientInfo: { name: "tabengine-selfcheck", version: "0.1.0" },
+    clientInfo: { name: "tabengine-selfcheck", version: "0.3.0" },
   });
   if (!initialized.serverInfo || initialized.serverInfo.name !== "tabengine-mcp") {
     fail("unexpected serverInfo: " + JSON.stringify(initialized.serverInfo));

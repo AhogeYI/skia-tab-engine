@@ -132,6 +132,22 @@ bool is_loopback_host_header(const std::string& host) {
     return name == "127.0.0.1" || name == "localhost" || name == "::1";
 }
 
+// Origin is a full URL ("http://127.0.0.1:8799"), unlike Host which is
+// "host:port". Browsers attach Origin even to same-origin module fetches,
+// so the scheme must be stripped before the host form applies.
+bool is_loopback_origin_header(const std::string& origin) {
+    std::string_view value = origin;
+    const std::size_t scheme = value.find("://");
+    if (scheme != std::string_view::npos) {
+        value = value.substr(scheme + 3);
+    }
+    const std::size_t path = value.find('/');
+    if (path != std::string_view::npos) {
+        value = value.substr(0, path);
+    }
+    return is_loopback_host_header(std::string(value));
+}
+
 std::string http_status_text(int status) {
     switch (status) {
     case 200: return "200 OK";
@@ -156,10 +172,19 @@ std::string json_error_payload(int http_status, std::string message) {
 }
 
 std::string response_head(int status, std::string_view content_type, std::size_t content_length,
-                          bool keep_alive = false) {
+                          bool keep_alive = false,
+                          std::string_view cache_control = {}) {
     std::string head = "HTTP/1.1 " + http_status_text(status) + "\r\n";
     head += "Content-Type: " + std::string(content_type) + "\r\n";
     head += "Content-Length: " + std::to_string(content_length) + "\r\n";
+    if (!cache_control.empty()) {
+        // Values come from transport/host code, never from requests; the
+        // guard keeps a malformed value from splitting headers.
+        if (cache_control.find('\r') == std::string_view::npos &&
+            cache_control.find('\n') == std::string_view::npos) {
+            head += "Cache-Control: " + std::string(cache_control) + "\r\n";
+        }
+    }
     head += "X-Content-Type-Options: nosniff\r\n";
     head += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
     head += "\r\n";
@@ -247,9 +272,11 @@ struct AutomationTransport::Impl {
     std::atomic<std::uint64_t> auth_failures{0};
     std::atomic<double> auth_lock_until{0.0};
 
-    // Host-mounted routes and the auth audit hook; installed before start()
-    // (single-threaded publication, worker-thread reads afterwards).
+    // Host-mounted routes, the unauthenticated static entry, and the auth
+    // audit hook; installed before start() (single-threaded publication,
+    // worker-thread reads afterwards).
     AutomationTransport::RouteHandler route_handler;
+    AutomationTransport::PublicFileHandler public_files;
     std::function<void(std::uint64_t, bool)> auth_failure_callback;
 
     [[nodiscard]] double monotonic() const {
@@ -313,8 +340,10 @@ struct AutomationTransport::Impl {
     // swallow the reply a client is waiting for (the io deadline still
     // bounds the wait, so stop() joins stay bounded).
     bool send_simple(SOCKET socket, int status, std::string_view content_type,
-                     const std::string& body, double deadline) {
-        const std::string head = response_head(status, content_type, body.size());
+                     const std::string& body, double deadline,
+                     std::string_view cache_control = {}) {
+        const std::string head =
+            response_head(status, content_type, body.size(), false, cache_control);
         return send_all_deadline(socket, head.data(), head.size(), deadline, false) &&
                (body.empty() ||
                 send_all_deadline(socket, body.data(), body.size(), deadline, false));
@@ -514,11 +543,27 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     // Host and Origin must both look loopback; a browser page served from
     // anywhere else cannot reach this service even if it learns the token.
     if (!is_loopback_host_header(host) ||
-        (!origin.empty() && !is_loopback_host_header(origin))) {
+        (!origin.empty() && !is_loopback_origin_header(origin))) {
         bump([](Stats& stats) { ++stats.rejected; });
         send_simple(socket, 403, "application/json",
                     json_error_payload(403, "non-loopback host"), monotonic() + config.io_timeout_s);
         return;
+    }
+    // Unauthenticated static entry (the devtools panel shell): GET only,
+    // answered by a handler that owns its bytes. The loopback and Origin
+    // boundary already ran; everything the shell can learn is public.
+    // Unhandled paths and methods fall through to the normal auth
+    // processing.
+    if (public_files && method == "GET") {
+        RouteReply static_reply;
+        if (public_files(url_path_only(target), static_reply) &&
+            static_reply.status != 0) {
+            bump([](Stats& stats) { ++stats.requests; });
+            send_simple(socket, static_reply.status, static_reply.content_type,
+                        static_reply.body, monotonic() + config.io_timeout_s,
+                        static_reply.cache_control);
+            return;
+        }
     }
     // Auth failure lockout sits ahead of parsing the token so brute force is
     // rate-limited, not just rejected.
@@ -717,7 +762,8 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
             if (host_reply.status != 0) {
                 bump([](Stats& stats) { ++stats.requests; });
                 send_simple(socket, host_reply.status, host_reply.content_type,
-                            host_reply.body, monotonic() + config.io_timeout_s);
+                            host_reply.body, monotonic() + config.io_timeout_s,
+                            host_reply.cache_control);
                 return;
             }
         }
@@ -1063,6 +1109,10 @@ AutomationTransport::Stats AutomationTransport::stats() const {
 
 void AutomationTransport::set_route_handler(RouteHandler handler) {
     impl_->route_handler = std::move(handler);
+}
+
+void AutomationTransport::set_public_file_handler(PublicFileHandler handler) {
+    impl_->public_files = std::move(handler);
 }
 
 std::string AutomationTransport::create_session() {

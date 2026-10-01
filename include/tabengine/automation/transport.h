@@ -111,6 +111,8 @@ public:
         int status = 0;                                    // 0 = not handled
         std::string content_type = "application/json";
         std::string body;
+        // Optional Cache-Control value for static replies ("" sends none).
+        std::string cache_control;
     };
     // `session` optionally names a logical session (see create_session);
     // empty runs the request on the incoming connection's identity.
@@ -124,6 +126,16 @@ public:
     using RouteHandler =
         std::function<RouteReply(const RouteRequest&, const RpcCall&, const ArtifactReader&)>;
     void set_route_handler(RouteHandler handler);
+    // ---- unauthenticated static entry ----
+    // Serves the devtools panel shell: GET-only static bytes the handler
+    // itself owns, answered after the loopback/Origin boundary but before
+    // auth so a browser can load the page without header tricks. The shell
+    // carries no secrets; every data, action, and artifact request still
+    // goes through the authenticated routes. A handler answering status 0
+    // falls through to normal auth processing. Install before start().
+    using PublicFileHandler =
+        std::function<bool(const std::string& path, RouteReply& reply)>;
+    void set_public_file_handler(PublicFileHandler handler);
     // Mints a logical session (stable connection identity across
     // requests) for host-side use such as legacy input gestures; returns
     // its id, or empty when max_sessions is reached. Thread-safe; idle

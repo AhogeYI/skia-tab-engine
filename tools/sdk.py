@@ -265,6 +265,74 @@ def sdk_stage(config: str, stage_root: Path | None = None) -> Path:
     return (stage_root or ROOT / "build" / "sdk-stage") / config
 
 
+MCP_FILES = ("server.mjs", "selfcheck.mjs", "regression_test.mjs",
+             "package.json", "package-lock.json", "README.md")
+DEVTOOLS_FILES = ("panel.html", "panel.css", "panel.js", "panel_core.js",
+                  "panel_test.mjs", "panel_dom_test.mjs")
+
+
+def source_provenance() -> dict:
+    """Real, checkable origin of the packaged bits: the exact commit and
+    whether the working tree carried uncommitted changes at packaging
+    time. Fail loudly when git cannot answer - guessing would defeat the
+    point."""
+    commit = capture("git", "-C", str(ROOT), "rev-parse", "HEAD").strip()
+    status = capture("git", "-C", str(ROOT), "status", "--porcelain").strip()
+    return {
+        "source_commit": commit,
+        "source_dirty": bool(status),
+        "source_branch": capture("git", "-C", str(ROOT), "rev-parse",
+                                 "--abbrev-ref", "HEAD").strip(),
+    }
+
+
+def install_tools(stage: Path) -> dict:
+    """Ships the devtools panel and the MCP adapter with the SDK.
+
+    The panel is plain static files. The MCP adapter carries vendored
+    production node_modules installed from its committed lockfile (npm ci
+    --omit=dev) so the package works without a registry round-trip; the
+    lockfile ships alongside for provenance. Returns the manifest's tools
+    section: actual versions and entry points, never guesses.
+    """
+    mcp_source = ROOT / "tools" / "mcp"
+    mcp_package = json.loads((mcp_source / "package.json").read_text(encoding="utf-8"))
+    devtools = stage / "tools" / "devtools"
+    devtools.mkdir(parents=True)
+    for name in DEVTOOLS_FILES:
+        source = mcp_source.parent / "devtools" / name
+        if not source.is_file():
+            raise SystemExit(f"devtools asset is missing: {source}")
+        shutil.copy2(source, devtools / name)
+    mcp = stage / "tools" / "mcp"
+    mcp.mkdir(parents=True)
+    for name in MCP_FILES:
+        source = mcp_source / name
+        if not source.is_file():
+            raise SystemExit(f"MCP adapter file is missing: {source}")
+        shutil.copy2(source, mcp / name)
+    npm = shutil.which("npm")
+    if npm is None:
+        raise SystemExit("npm is required to vendor the MCP adapter's dependencies")
+    # Absolute path: npm is npm.cmd on Windows and subprocess will not
+    # resolve PATHEXT extensions on its own.
+    run(npm, "ci", "--omit=dev", "--no-fund", "--no-audit", cwd=str(mcp_source))
+    shutil.copytree(mcp_source / "node_modules", mcp / "node_modules")
+    return {
+        "devtools": {
+            "entry": "tools/devtools/panel.html",
+            "assets": "tools/devtools",
+        },
+        "mcp": {
+            "version": mcp_package["version"],
+            "entry": "tools/mcp/server.mjs",
+            "selfcheck": "tools/mcp/selfcheck.mjs",
+            "transport": "MCP stdio; automation protocol 1.0 over loopback HTTP",
+            "node": ">=20 (vendored dependencies; no install step)",
+        },
+    }
+
+
 def package_sdk(config: str, skia_root: Path | None = None,
                 stage_root: Path | None = None, out_dir: Path | None = None) -> Path:
     skia_root = (skia_root or shared_package(config)).resolve()
@@ -296,6 +364,7 @@ def package_sdk(config: str, skia_root: Path | None = None,
         shutil.copy2(source, stage / name)
     for name in ("SKIA_BUILD_INFO.txt", "skia_args.gn"):
         shutil.copy2(skia_root / name, stage / name)
+    tools_section = install_tools(stage)
     version_match = re.search(r"project\(TabEngine VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
     version = version_match.group(1) if version_match else "unknown"
     files = sorted(p for p in stage.rglob("*") if p.is_file() and p.name != "manifest.json")
@@ -307,6 +376,8 @@ def package_sdk(config: str, skia_root: Path | None = None,
         "skia_gn_args_sha256": hashlib.sha256((stage / "skia_args.gn").read_bytes()).hexdigest(),
         "configuration": config,
         "platform": "windows-x64",
+        "provenance": source_provenance(),
+        "tools": tools_section,
         "files": {p.relative_to(stage).as_posix(): hash_file(p) for p in files},
     }
     (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -385,9 +456,25 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
                      "docs/AUTOMATION_GUIDE.md", "docs/AUTOMATION_API_REFERENCE.md",
                      "tools/automation/te.py",
                      "examples/automation_demo/CMakeLists.txt",
-                     "examples/automation_demo/main.cpp"):
+                     "examples/automation_demo/main.cpp",
+                     "tools/devtools/panel.html", "tools/devtools/panel.js",
+                     "tools/devtools/panel_core.js", "tools/devtools/panel.css",
+                     "tools/mcp/server.mjs", "tools/mcp/selfcheck.mjs",
+                     "tools/mcp/package.json", "tools/mcp/package-lock.json",
+                     "tools/mcp/README.md"):
         if not (stage / relative).is_file():
             raise SystemExit(f"SDK developer resource is missing: {relative}")
+    tools_section = manifest.get("tools") or {}
+    mcp_info = tools_section.get("mcp") or {}
+    if not mcp_info.get("entry"):
+        raise SystemExit("SDK manifest does not declare the MCP adapter")
+    if not any(p.startswith("tools/mcp/node_modules/") for p in manifest["files"]):
+        raise SystemExit("SDK manifest does not include vendored MCP dependencies")
+    provenance = manifest.get("provenance") or {}
+    if not provenance.get("source_commit"):
+        raise SystemExit("SDK manifest does not declare its source commit")
+    if provenance.get("source_dirty"):
+        print("NOTE: the packaged working tree had uncommitted changes")
     consumer_src = build.parent / "consumer-src"
     shutil.copytree(ROOT / "tests" / "sdk_consumer", consumer_src)
     run("cmake", "-S", str(consumer_src), "-B", str(build),
@@ -418,9 +505,73 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
         "-G", "Visual Studio 18 2026", "-A", "x64",
         f"-DTABENGINE_SDK_ROOT={stage}")
     run("cmake", "--build", str(automation_build), "--config", config)
-    run(str(automation_build / config / "tabengine_automation_demo.exe"),
-        "--self-check", "--raster", env=env)
+    demo = automation_build / config / "tabengine_automation_demo.exe"
+    run(str(demo), "--self-check", "--raster", env=env)
     print("SDK packaged automation demo passed")
+
+    verify_packaged_tools(stage, demo, env)
+
+
+def verify_packaged_tools(stage: Path, demo: Path, env: dict[str, str]) -> None:
+    """Tool-level checks against the extracted package only.
+
+    - The panel logic regression runs from the package (node, no deps).
+    - The MCP adapter loads its vendored dependencies from a directory with
+      spaces in its name (Windows shim/path robustness) and refuses to start
+      without connection settings instead of crashing.
+    - The adapter answers a real MCP handshake against the packaged demo.
+    """
+    node = shutil.which("node")
+    if node is None:
+        raise SystemExit("node is required to verify the packaged tools")
+    run(node, str(stage / "tools" / "devtools" / "panel_test.mjs"))
+    run(node, str(stage / "tools" / "devtools" / "panel_dom_test.mjs"))
+    print("SDK packaged devtools panel logic passed")
+
+    spaced = stage.parent / "mcp tool dir"
+    shutil.copytree(stage / "tools" / "mcp", spaced)
+    clean_env = {k: v for k, v in os.environ.items()
+                 if not k.startswith("TABENGINE_")}
+    probe = subprocess.run([node, str(spaced / "server.mjs")],
+                           capture_output=True, text=True, env=clean_env,
+                           timeout=60)
+    if probe.returncode != 2 or "tabengine-mcp:" not in probe.stderr:
+        raise SystemExit("MCP adapter from a spaced path did not fail cleanly: "
+                         f"rc={probe.returncode} err={probe.stderr[:200]}")
+    print("SDK packaged MCP adapter loads (spaced path) passed")
+
+    # Live attach: the packaged demo hosts the surface; the packaged adapter
+    # speaks MCP against it. The token rides a file, never an argument.
+    import time
+    work = stage.parent / "mcp-live"
+    work.mkdir(exist_ok=True)
+    descriptor = work / "descriptor.json"
+    token_file = work / "token.txt"
+    token = "verify-live-token-0123456789"
+    live_env = dict(clean_env)
+    live_env["PATH"] = str(stage / "bin") + os.pathsep + live_env.get("PATH", "")
+    demo_proc = subprocess.Popen(
+        [str(demo), "--raster", "--hidden", "--token", token,
+         "--descriptor-out", str(descriptor), "--token-out", str(token_file)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=live_env)
+    try:
+        deadline = time.monotonic() + 30.0
+        while not descriptor.is_file() or not token_file.is_file():
+            if time.monotonic() > deadline or demo_proc.poll() is not None:
+                raise SystemExit("packaged demo did not publish its descriptor")
+            time.sleep(0.2)
+        check_env = dict(clean_env)
+        descriptor_json = json.loads(descriptor.read_text(encoding="utf-8"))
+        check_env["TABENGINE_ENDPOINT"] = descriptor_json["endpoint"]
+        check_env["TABENGINE_TOKEN"] = token_file.read_text(encoding="utf-8").strip()
+        run(node, str(spaced / "selfcheck.mjs"), env=check_env)
+        print("SDK packaged MCP selfcheck against the demo passed")
+    finally:
+        demo_proc.terminate()
+        try:
+            demo_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            demo_proc.kill()
 
 
 def main() -> None:

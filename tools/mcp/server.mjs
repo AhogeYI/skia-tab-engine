@@ -219,7 +219,7 @@ function refused(message) {
   return { content: [{ type: "text", text: "REFUSED: " + message }], isError: true };
 }
 
-const server = new McpServer({ name: "tabengine-mcp", version: "0.1.0" });
+const server = new McpServer({ name: "tabengine-mcp", version: "0.3.0" });
 
 server.registerTool("get_info", {
   title: "Instance info",
