@@ -12,7 +12,7 @@ if(NOT TABENGINE_SDK_ROOT)
     message(FATAL_ERROR "Set TABENGINE_SDK_ROOT to an extracted TabEngine SDK root")
 endif()
 
-find_package(TabEngine 0.2.0 EXACT CONFIG REQUIRED
+find_package(TabEngine 0.3.0 EXACT CONFIG REQUIRED
     PATHS "${TABENGINE_SDK_ROOT}" NO_DEFAULT_PATH)
 
 add_executable(tabengine_automation_demo main.cpp)
