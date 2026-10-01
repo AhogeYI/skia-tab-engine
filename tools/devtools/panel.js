@@ -5,6 +5,7 @@
 import {
   createRpcClient, createEventCursor, createMutationGate,
   imageToClient, redact, diagnosticsSnapshot,
+  nodeClickParams, keyParams, wheelParams,
 } from "./panel_core.js";
 
 const $ = (id) => document.getElementById(id);
@@ -47,9 +48,15 @@ function fetchBytes(path, options) {
   }).finally(() => clearTimeout(timer));
 }
 
-const rpc = createRpcClient({ fetchText, fetchBytes });
 const gate = createMutationGate();
+const rpc = createRpcClient({ fetchText, fetchBytes }, {
+  authorize(method) {
+    const descriptor = state.schema && state.schema.methods.find((item) => item.name === method);
+    return gate.check(descriptor || { mutating: method !== "System.getInfo" });
+  },
+});
 const events = createEventCursor();
+let activeToken = "";
 const state = {
   info: null, schema: null, connected: false,
   windows: [], windowId: null, scale: 1,
@@ -59,7 +66,7 @@ const state = {
 };
 
 function secrets() {
-  return [rpc.hasToken() ? null : "", $("token").value].filter(Boolean);
+  return [activeToken, $("token").value].filter(Boolean);
 }
 function toast(message, isError) {
   const box = $("toast");
@@ -78,7 +85,8 @@ function setStatus(text, cls) {
 }
 async function connect() {
   endpoint = $("endpoint").value.trim() || location.origin;
-  rpc.setToken($("token").value);
+  activeToken = $("token").value;
+  rpc.setToken(activeToken);
   if (!rpc.hasToken()) { toast("enter the control token first", true); return; }
   const info = await rpc.call("System.getInfo");
   if (!info.ok) {
@@ -116,6 +124,11 @@ async function fetchSchema() {
 function disconnect() {
   stopPolling();
   rpc.clearToken();
+  gate.setAllowed(false);
+  $("allow-write").checked = false;
+  $("token").value = "";
+  activeToken = "";
+  if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
   state.connected = false;
   state.info = null; state.schema = null; state.snapshot = null; state.shot = null;
   setStatus("disconnected");
@@ -126,6 +139,9 @@ function disconnect() {
   $("node-details").textContent = "select a node";
   $("method-list").replaceChildren();
   $("shot-empty").hidden = false;
+  $("shot").removeAttribute("src");
+  state.selectedNode = null;
+  state.windowId = null;
 }
 
 // ---- inspect ------------------------------------------------------------
@@ -209,19 +225,19 @@ function selectNode(node, row) {
   drawOverlay();
 }
 async function performNodeAction(node, action) {
-  const check = gate.check({ mutating: action !== "click" || false });
+  const check = gate.check({ mutating: true });
   if (!check.permitted) { toast(check.reason, true); return; }
   if (action === "click") {
-    const params = { windowId: state.windowId, node: String(node.node),
-                     snapshotId: state.snapshot && state.snapshot.revision, strict: true };
+    const params = nodeClickParams(state.windowId, node, state.snapshot);
     const result = await rpc.call("Input.click", params);
     if (result.ok) { toast("clicked node " + nodeTitle(node)); await refreshTree(); }
     else toast("click failed: " + result.error.message, true);
   } else if (action === "type") {
     const text = prompt("text to type");
     if (text === null) return;
-    const result = await rpc.call("Input.typeText",
-      { windowId: state.windowId, text, node: String(node.node) });
+    const focused = await rpc.call("Input.click", nodeClickParams(state.windowId, node, state.snapshot));
+    if (!focused.ok) { toast("focus failed: " + focused.error.message, true); return; }
+    const result = await rpc.call("Input.typeText", { windowId: state.windowId, text });
     if (!result.ok) toast("type failed: " + result.error.message, true);
   }
 }
@@ -259,19 +275,18 @@ function drawOverlay() {
   context.clearRect(0, 0, canvas.width, canvas.height);
   const bounds = state.selectedNode.bounds;
   if (!bounds) return;
-  // Node bounds are client logical px; the image is client physical px.
-  const scale = state.scale || 1;
+  const origin = state.shot.meta.bounds || { x: 0, y: 0 };
   context.strokeStyle = "#4da3ff";
   context.lineWidth = Math.max(2, canvas.width / 480);
-  context.strokeRect(bounds.x * scale, bounds.y * scale,
-                      bounds.width * scale, bounds.height * scale);
+  context.strokeRect(bounds.x - origin.x, bounds.y - origin.y,
+                      bounds.width, bounds.height);
 }
 async function imageClick(event) {
   if (!state.shot) return;
   const rect = $("shot").getBoundingClientRect();
   const px = (event.clientX - rect.left) * ($("shot").naturalWidth / rect.width);
   const py = (event.clientY - rect.top) * ($("shot").naturalHeight / rect.height);
-  const point = imageToClient(px, py, { scale: state.scale, bounds: { x: 0, y: 0 } });
+  const point = imageToClient(px, py, state.shot.meta);
   const gateCheck = gate.check({ mutating: true });
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); return; }
   const result = await rpc.call("Input.click",
@@ -291,7 +306,7 @@ async function sendKey(kind) {
   const gateCheck = gate.check({ mutating: true });
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); return; }
   const result = await rpc.call("Input.key",
-    { windowId: state.windowId, key, action: kind });
+    keyParams(state.windowId, key, kind));
   logInput("key " + key + " " + kind + ": " + (result.ok ? "ok" : result.error.message));
 }
 async function sendText() {
@@ -306,8 +321,10 @@ async function sendWheel() {
   const notches = Number($("input-wheel").value) || 0;
   const gateCheck = gate.check({ mutating: true });
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); return; }
-  const result = await rpc.call("Input.wheel",
-    { windowId: state.windowId, notches });
+  const bounds = state.selectedNode && state.selectedNode.bounds;
+  const point = bounds ? { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
+    : { x: 0, y: 0 };
+  const result = await rpc.call("Input.wheel", wheelParams(state.windowId, notches, point));
   logInput("wheel " + notches + ": " + (result.ok ? "ok" : result.error.message));
 }
 
@@ -345,7 +362,7 @@ function selectMethod(method, row) {
   const properties = method.params && method.params.properties;
   area.value = properties && Object.keys(properties).length
     ? JSON.stringify(Object.fromEntries(
-        Object.keys(properties).map((key) => [key, sampleValue(properties[key], method)])), null, 2)
+        Object.keys(properties).map((key) => [key, sampleValue(key, properties[key], method)])), null, 2)
     : "{}";
   form.append(area);
   const run = el("button", "invoke");
@@ -354,9 +371,8 @@ function selectMethod(method, row) {
   $("method-result").textContent = "";
   $("method-wait").replaceChildren();
 }
-function sampleValue(property, method) {
+function sampleValue(name, property, method) {
   const required = (method.params && method.params.required) || [];
-  const name = property.name || "";
   if (property.type === "number" || property.type === "integer") {
     return required.includes(name) ? 0 : undefined;
   }
@@ -383,6 +399,8 @@ async function trackOperation(operationId) {
   const status = el("span", "operation " + operationId + ": …");
   const cancel = el("button", "cancel");
   cancel.addEventListener("click", async () => {
+    const check = gate.check({ mutating: true });
+    if (!check.permitted) { toast(check.reason, true); return; }
     const result = await rpc.call("Operation.cancel", { operationId });
     status.textContent = "cancel: " + (result.ok
       ? JSON.stringify(result.result) : result.error.message);
@@ -396,7 +414,7 @@ async function trackOperation(operationId) {
     status.textContent = "operation " + operationId + ": " + info.state +
       (info.cancellationRequested ? " (cancel requested)" : "") +
       (info.progress ? " " + info.progress.done + "/" + info.progress.total : "");
-    if (["completed", "failed", "cancelled"].includes(info.state)) return;
+    if (["completed", "failed", "cancelled", "providerUnavailable"].includes(info.state)) return;
   }
   status.textContent = "operation tracking stopped (still running)";
 }

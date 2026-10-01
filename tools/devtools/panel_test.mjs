@@ -6,6 +6,7 @@
 import {
   createRpcClient, createEventCursor, imageToClient, createMutationGate,
   redact, diagnosticsSnapshot, RPC_PATH, ARTIFACT_PATH,
+  nodeClickParams, keyParams, wheelParams,
 } from "./panel_core.js";
 
 let failures = 0;
@@ -109,29 +110,46 @@ function makeTransport(responses) {
   const cursor = createEventCursor();
   let applied = cursor.apply({ events: [
     { sequence: 5, name: "tab.created" }, { sequence: 6, name: "tab.closed" },
-  ], nextCursor: 7 });
+  ], next: 6 });
   check(applied.events.length === 2 && !applied.gapped, "first batch accepted");
-  check(cursor.since === 7, "cursor advanced past the last sequence");
-  applied = cursor.apply({ events: [{ sequence: 7, name: "input.dispatched" }], nextCursor: 8 });
+  check(cursor.since === 6, "cursor is the last sequence seen, not the next one");
+  applied = cursor.apply({ events: [{ sequence: 7, name: "input.dispatched" }], next: 7 });
   check(applied.events.length === 1, "next batch accepted");
-  applied = cursor.apply({ gap: true, nextCursor: 40, events: [] });
-  check(applied.gapped && applied.events.length === 0 && applied.dropped,
-        "gap flags discontinuity and drops the batch");
-  check(cursor.since === 40 && cursor.gapCount === 1, "cursor reset to server cursor on gap");
-  applied = cursor.apply({ events: [{ sequence: 41, name: "x" }], nextCursor: 42 });
+  applied = cursor.apply({ gap: true, next: 40, oldestAvailable: 40,
+    events: [{ sequence: 40, name: "retained" }] });
+  check(applied.gapped && applied.events.length === 1 && !applied.dropped,
+        "gap reports discontinuity without dropping retained events");
+  check(cursor.since === 40 && cursor.gapCount === 1, "cursor matches server next on gap");
+  applied = cursor.apply({ events: [{ sequence: 41, name: "x" }], next: 41 });
   check(applied.events.length === 1 && !applied.gapped, "stream resumes after the gap");
+  applied = cursor.apply({ events: [{ sequence: 41, name: "x" }], next: 41 });
+  check(applied.events.length === 0 && cursor.since === 41, "duplicates do not replay");
+  applied = cursor.apply({ gap: true, events: [], next: 41, oldestAvailable: 60 });
+  check(applied.gapped && cursor.since === 59, "fully trimmed ring advances beyond lost history");
 }
 
 // ---- coordinate mapping (DPI) ---------------------------------------------
 {
   const point = imageToClient(300, 150, { scale: 1.5, bounds: { x: 10, y: 20 } });
-  check(point.x === 10 + 200 && point.y === 20 + 100,
-        "image px maps back through scale and origin");
+  check(point.x === 310 && point.y === 170,
+        "client pixels retain physical DPI scale and add crop origin");
   const identity = imageToClient(50, 60, { scale: 1, bounds: { x: 0, y: 0 } });
   check(identity.x === 50 && identity.y === 60, "scale 1 is the identity");
   let threw = false;
-  try { imageToClient(1, 1, { scale: 0 }); } catch (_) { threw = true; }
-  check(threw, "invalid scale throws instead of mapping silently");
+  try { imageToClient(NaN, 1, {}); } catch (_) { threw = true; }
+  check(threw, "invalid coordinates throw instead of mapping silently");
+  check(imageToClient(2.6, 3.4, {}).x === 3, "input coordinates use integer client pixels");
+}
+
+// Actual bridge schemas, not test-only payload shapes.
+{
+  const click = nodeClickParams("1", { node: "4" }, { revision: 99, layoutRevision: 7 });
+  check(click.snapshotId === 7 && click.strict, "strict clicks use layoutRevision");
+  const key = keyParams("1", "Enter", "down");
+  check(key.kind === "down" && !("action" in key), "key uses required kind field");
+  const wheel = wheelParams("1", -2, { x: 30.2, y: 50.8 });
+  check(wheel.deltaY === -240 && wheel.x === 30 && wheel.y === 51,
+        "wheel sends a client position and native delta");
 }
 
 // ---- write gate -----------------------------------------------------------
@@ -146,6 +164,22 @@ function makeTransport(responses) {
   check(gate.check({ mutating: true }).permitted, "opt-in unblocks mutations");
 }
 
+{
+  const gate = createMutationGate();
+  const transport = makeTransport({ default: { status: 200,
+    body: '{"result":{}}' } });
+  const client = createRpcClient(transport.fetchText, {
+    authorize: () => gate.check({ mutating: true }),
+  });
+  client.setToken("token");
+  for (const method of ["Input.click", "Input.key", "Operation.cancel"]) {
+    check(!(await client.call(method)).ok, method + " refused at the dispatch boundary");
+  }
+  check(transport.requests.length === 0, "blocked writes never reach HTTP");
+  gate.setAllowed(true);
+  check((await client.call("Input.click")).ok, "opt-in permits dispatch");
+}
+
 // ---- redaction / diagnostics ----------------------------------------------
 {
   const text = redact("bearer secret-token-1234567890 at /rpc", ["secret-token-1234567890"]);
@@ -155,7 +189,8 @@ function makeTransport(responses) {
     token: "never-appears", accessToken: "nor-this",
     info: { engineVersion: "0.3.0", nested: { token: "nope" } },
   }, ["secret-token-1234567890"]);
-  check(snapshot.indexOf("never-appears") < 0 && snapshot.indexOf("nor-this") < 0,
+  check(snapshot.indexOf("never-appears") < 0 && snapshot.indexOf("nor-this") < 0 &&
+        snapshot.indexOf("nope") < 0,
         "credential-looking fields are dropped from diagnostics");
   check(snapshot.indexOf("0.3.0") >= 0, "ordinary data survives");
 }

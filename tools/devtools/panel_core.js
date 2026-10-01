@@ -14,7 +14,7 @@ export const ARTIFACT_PATH = "/automation/v1/artifacts/";
 // never placed in a path or query. `transport.fetchBytes` (optional) must
 // return {status, bytes: ArrayBuffer} - artifacts are binary and must never
 // round-trip through text decoding.
-export function createRpcClient(transport) {
+export function createRpcClient(transport, policy = {}) {
   const fetchText = typeof transport === "function" ? transport : transport.fetchText;
   const fetchBytes = typeof transport === "object" && transport.fetchBytes
     ? transport.fetchBytes : null;
@@ -25,6 +25,10 @@ export function createRpcClient(transport) {
     hasToken() { return token.length > 0; },
     clearToken() { token = ""; },
     async call(method, params = {}, timeoutS = 10) {
+      const decision = policy.authorize ? policy.authorize(method) : { permitted: true };
+      if (!decision.permitted) {
+        return { ok: false, error: { code: 0, message: decision.reason || "action refused" } };
+      }
       if (!token) {
         return { ok: false, error: { code: 0, message: "no token" } };
       }
@@ -92,42 +96,55 @@ export function createEventCursor() {
   return {
     get since() { return next; },
     get gapCount() { return gaps; },
-    // Applies one Event.poll result ({events, nextCursor, gap?}) and
-    // returns the accepted events. On a gap, the cursor resets to the
-    // server's nextCursor and flags the discontinuity once.
+    // `since` is the last sequence seen, exclusive. Event.poll returns
+    // {events, next, gap, oldestAvailable}; preserve retained events on gaps.
     apply(batch) {
       const events = Array.isArray(batch && batch.events) ? batch.events : [];
-      const cursor = Number(batch && batch.nextCursor);
+      const cursor = Number(batch && batch.next);
       let gapped = false;
       if (batch && batch.gap) {
         gaps += 1;
         gapped = true;
-        next = Number.isFinite(cursor) ? cursor : 0;
-        return { events: [], gapped, dropped: true };
+        const oldest = Number(batch.oldestAvailable);
+        if (Number.isFinite(oldest)) next = Math.max(next, oldest - 1);
       }
-      for (const event of events) {
+      const accepted = events.filter((event) => Number(event.sequence) > next);
+      for (const event of accepted) {
         const sequence = Number(event.sequence);
-        if (Number.isFinite(sequence) && sequence >= next) {
-          next = sequence + 1;
+        if (Number.isFinite(sequence) && sequence > next) {
+          next = sequence;
         }
       }
-      return { events, gapped, dropped: false };
+      if (Number.isFinite(cursor)) next = Math.max(next, cursor);
+      return { events: accepted, gapped, dropped: false };
     },
   };
 }
 
-// Maps a point in screenshot pixels back to window client logical
-// coordinates. `meta` = {scale, bounds:{x,y}} from the capture result and
-// the window entry. Pixel data is premultiplied sRGB; the mapping is the
-// exact inverse of what the renderer applied.
+// Both screenshots and automation bounds/input use client physical pixels.
+// Browser CSS scaling is undone by the caller; only the crop origin remains.
 export function imageToClient(px, py, meta) {
-  const rawScale = meta ? Number(meta.scale) : NaN;
-  if (!(rawScale > 0)) throw new Error("invalid scale");
   const bounds = (meta && meta.bounds) || { x: 0, y: 0 };
+  if (![px, py, bounds.x, bounds.y].every(Number.isFinite)) {
+    throw new Error("invalid capture coordinates");
+  }
   return {
-    x: bounds.x + px / rawScale,
-    y: bounds.y + py / rawScale,
+    x: Math.round(bounds.x + px),
+    y: Math.round(bounds.y + py),
   };
+}
+
+export function nodeClickParams(windowId, node, snapshot) {
+  return { windowId, node: String(node.node), snapshotId: snapshot.layoutRevision, strict: true };
+}
+
+export function keyParams(windowId, key, kind) {
+  return { windowId, key, kind };
+}
+
+export function wheelParams(windowId, notches, point = { x: 0, y: 0 }) {
+  return { windowId, x: Math.round(point.x), y: Math.round(point.y),
+           deltaY: Math.round(notches * 120) };
 }
 
 // Mutating methods stay refused until the operator explicitly opts in for
@@ -169,7 +186,8 @@ export function diagnosticsSnapshot(sections, secrets) {
   const clean = {};
   for (const [name, value] of Object.entries(sections || {})) {
     if (/token|secret|password|authorization/i.test(name)) continue;
-    clean[name] = JSON.parse(JSON.stringify(value));
+    clean[name] = JSON.parse(JSON.stringify(value, (key, item) =>
+      /token|secret|password|authorization/i.test(key) ? undefined : item));
   }
   return redact(JSON.stringify(clean, null, 2), secrets);
 }
