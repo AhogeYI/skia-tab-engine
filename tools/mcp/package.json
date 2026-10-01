@@ -8,7 +8,8 @@
     "tabengine-mcp": "./server.mjs"
   },
   "scripts": {
-    "selfcheck": "node selfcheck.mjs"
+    "selfcheck": "node selfcheck.mjs",
+    "test": "node regression_test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.31.0",

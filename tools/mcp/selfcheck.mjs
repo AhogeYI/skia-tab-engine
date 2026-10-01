@@ -9,6 +9,7 @@
 // tool; otherwise the check verifies the refusal.
 
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 class McpClient {
   constructor(process_) {
@@ -26,9 +27,7 @@ class McpClient {
         const message = JSON.parse(line);
         if (message.id !== undefined && this.pending.has(message.id)) {
           const settle = this.pending.get(message.id);
-          this.pending.delete(message.id);
-          if (message.error) settle(new Error(message.error.message));
-          else settle(message.result);
+          settle(message);
         }
       }
     });
@@ -37,10 +36,18 @@ class McpClient {
   request(method, params) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, resolve);
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("timeout on " + method));
+      }, 30000);
+      this.pending.set(id, (message) => {
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        if (message.error) reject(new Error(message.error.message));
+        else resolve(message.result);
+      });
       this.process.stdin.write(
         JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-      setTimeout(() => reject(new Error("timeout on " + method)), 30000);
     });
   }
 
@@ -62,7 +69,7 @@ if (!endpoint || !token) {
   process.exit(2);
 }
 
-const adapter = spawn(process.execPath, ["server.mjs"], {
+const adapter = spawn(process.execPath, [fileURLToPath(new URL("server.mjs", import.meta.url))], {
   env: process.env,
   stdio: ["pipe", "pipe", "inherit"],
 });
@@ -121,5 +128,5 @@ try {
 } catch (error) {
   fail(error.message);
 } finally {
-  adapter.kill();
+  adapter.stdin.end();
 }

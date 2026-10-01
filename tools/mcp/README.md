@@ -19,6 +19,18 @@ node server.mjs                          # or: node tools/mcp/server.mjs from th
 | Descriptor | `TABENGINE_DESCRIPTOR` (file) + `TABENGINE_TOKEN`/`TABENGINE_TOKEN_FILE` | Reads the endpoint from the host's connection descriptor; the token never travels in the file next to it unless you choose `TABENGINE_TOKEN_FILE`. |
 | Explicit launch | `TABENGINE_LAUNCH` (command) + `TABENGINE_LAUNCH_DESCRIPTOR` (file the command writes) [+ `TABENGINE_TOKEN_FILE`] | The adapter spawns the host, waits for the descriptor, and terminates it with itself. |
 
+For direct executable launch, set `TABENGINE_LAUNCH_ARGS` to a JSON array
+of strings (including `[]` for no arguments). Without it, the command runs
+through a shell. Use a fresh descriptor path; a leftover descriptor is
+rejected. The host must publish the token before the descriptor. Host stdout
+is discarded to preserve the MCP stdio stream. On Windows cleanup terminates
+the owned process tree; shell commands must keep their host in the foreground.
+
+Input tools share a logical session, including `call_method` for `Input.*`.
+Normal RPC traffic refreshes its lease. After idle expiry a call reports an
+error without replaying input; start a new gesture on the next call. Closing
+the adapter explicitly releases the session and any held input.
+
 ## Tools
 
 - `get_info` - instance identity, versions, capabilities.
@@ -43,8 +55,11 @@ node server.mjs                          # or: node tools/mcp/server.mjs from th
 
 ## Self-check
 
+`npm test` runs window-free protocol regressions for event cursors, dynamic
+method permissions, input session ownership, and launch discovery/cleanup.
+
 With a live instance (for example a headless product or the automation
-demo), run the handshake and one call per tool:
+demo), run the handshake and tool smoke checks:
 
 ```powershell
 $env:TABENGINE_ENDPOINT = "http://127.0.0.1:PORT"

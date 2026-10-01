@@ -18,7 +18,7 @@
 // tool output, logs, or resource URIs.
 
 import { readFileSync, existsSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -35,6 +35,15 @@ function fail(message) {
 let endpoint = process.env.TABENGINE_ENDPOINT || "";
 let token = process.env.TABENGINE_TOKEN || "";
 let launched = null;
+process.on("exit", () => {
+  if (!launched || launched.exitCode !== null || launched.killed) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill.exe", ["/PID", String(launched.pid), "/T", "/F"],
+      { stdio: "ignore", windowsHide: true, timeout: 5000 });
+  } else {
+    launched.kill();
+  }
+});
 
 if (!endpoint && process.env.TABENGINE_DESCRIPTOR) {
   try {
@@ -45,7 +54,8 @@ if (!endpoint && process.env.TABENGINE_DESCRIPTOR) {
     fail("cannot read descriptor: " + error.message);
   }
 }
-if (!token && process.env.TABENGINE_TOKEN_FILE) {
+if (!token && process.env.TABENGINE_TOKEN_FILE &&
+    (endpoint || !process.env.TABENGINE_LAUNCH)) {
   try {
     token = readFileSync(process.env.TABENGINE_TOKEN_FILE, "utf-8").trim();
   } catch (error) {
@@ -55,27 +65,45 @@ if (!token && process.env.TABENGINE_TOKEN_FILE) {
 if (!endpoint && process.env.TABENGINE_LAUNCH) {
   const descriptorPath = process.env.TABENGINE_LAUNCH_DESCRIPTOR;
   if (!descriptorPath) fail("launch mode needs TABENGINE_LAUNCH_DESCRIPTOR");
-  launched = spawn(process.env.TABENGINE_LAUNCH, {
-    shell: true,
-    stdio: ["ignore", "inherit", "inherit"],
+  if (existsSync(descriptorPath)) fail("launch descriptor already exists; use a fresh path");
+  let args;
+  if (process.env.TABENGINE_LAUNCH_ARGS) {
+    try {
+      args = JSON.parse(process.env.TABENGINE_LAUNCH_ARGS);
+      if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new Error();
+    } catch {
+      fail("TABENGINE_LAUNCH_ARGS must be a JSON array of strings");
+    }
+  }
+  launched = spawn(process.env.TABENGINE_LAUNCH, args || [], {
+    shell: args === undefined,
+    // Host stdout is not an MCP message stream.
+    stdio: ["ignore", "ignore", "inherit"],
+    windowsHide: true,
     env: process.env,
   });
+  launched.on("error", () => fail("cannot launch host"));
   launched.on("exit", (code) => {
     if (code !== null && code !== 0) {
       console.error(`tabengine-mcp: launched host exited with ${code}`);
     }
   });
   const deadline = Date.now() + 20000;
-  while (!existsSync(descriptorPath) && Date.now() < deadline) {
+  while (Date.now() < deadline) {
+    if (launched.exitCode !== null) fail("host exited before discovery completed");
+    try {
+      const descriptor = JSON.parse(readFileSync(descriptorPath, "utf-8"));
+      const discoveredToken = token || (process.env.TABENGINE_TOKEN_FILE
+        ? readFileSync(process.env.TABENGINE_TOKEN_FILE, "utf-8").trim() : "");
+      if (descriptor.endpoint && discoveredToken) {
+        endpoint = descriptor.endpoint;
+        token = discoveredToken;
+        break;
+      }
+    } catch { /* Descriptor and token may still be being written. */ }
     await delay(100);
   }
-  if (!existsSync(descriptorPath)) fail("launched host wrote no descriptor");
-  try {
-    const descriptor = JSON.parse(readFileSync(descriptorPath, "utf-8"));
-    endpoint = descriptor.endpoint || "";
-  } catch (error) {
-    fail("cannot read launched descriptor: " + error.message);
-  }
+  if (!endpoint || !token) fail("host did not publish a descriptor and token in time");
 }
 if (!endpoint) {
   fail("no connection: set TABENGINE_ENDPOINT+TOKEN, TABENGINE_DESCRIPTOR, " +
@@ -83,16 +111,64 @@ if (!endpoint) {
 }
 if (!token) fail("no token: set TABENGINE_TOKEN or TABENGINE_TOKEN_FILE");
 endpoint = endpoint.replace(/\/+$/, "");
+try {
+  const url = new URL(endpoint);
+  if (url.protocol !== "http:" ||
+      !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname) ||
+      url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+    throw new Error();
+  }
+} catch {
+  fail("endpoint must be an HTTP loopback origin");
+}
 
 let nextRequestId = 1;
+let sessionId = "";
+let sessionPromise = null;
+
+async function inputSession() {
+  if (sessionId) return sessionId;
+  if (!sessionPromise) {
+    sessionPromise = (async () => {
+      const response = await fetch(endpoint + PROTOCOL_PREFIX + "/session", {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + token },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) throw new Error(`session HTTP ${response.status}`);
+      sessionId = (await response.json()).sessionId;
+      if (!sessionId) throw new Error("session response lacks sessionId");
+      return sessionId;
+    })().finally(() => { sessionPromise = null; });
+  }
+  return sessionPromise;
+}
+
+async function closeSession() {
+  if (sessionPromise) {
+    try { await sessionPromise; } catch { /* Discovery may have failed. */ }
+  }
+  const id = sessionId;
+  sessionId = "";
+  if (!id) return;
+  try {
+    await fetch(endpoint + PROTOCOL_PREFIX + "/session", {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer " + token, "X-TabEngine-Session": id },
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch { /* The host also expires abandoned sessions. */ }
+}
 
 async function rpc(method, params) {
+  const headers = { "Content-Type": "application/json", "Authorization": "Bearer " + token };
+  // Input sequences use one logical identity across HTTP requests. Other
+  // calls touch an existing session so ordinary tool use refreshes its lease.
+  if (allowMutations && method.startsWith("Input.")) await inputSession();
+  if (sessionId) headers["X-TabEngine-Session"] = sessionId;
   const response = await fetch(endpoint + PROTOCOL_PREFIX + "/rpc", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + token,
-    },
+    headers,
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: String(nextRequestId++),
@@ -101,7 +177,13 @@ async function rpc(method, params) {
     }),
     signal: AbortSignal.timeout(30000),
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 404 && sessionId) {
+      sessionId = "";
+      throw new Error("input session expired; held input was released; start a new gesture");
+    }
+    throw new Error(`HTTP ${response.status}`);
+  }
   const envelope = await response.json();
   if (envelope.error) {
     throw new Error(`${envelope.error.message} [code ${envelope.error.code}]`);
@@ -120,15 +202,11 @@ async function artifactBytes(artifactId) {
 }
 
 // Method registry (mutating flags drive the permission filter).
-let methodRegistry = null;
-
 async function registry() {
-  if (!methodRegistry) {
-    const schema = await rpc("System.getSchema");
-    methodRegistry = new Map();
-    for (const method of schema.methods || []) {
-      methodRegistry.set(method.name, method);
-    }
+  const schema = await rpc("System.getSchema");
+  const methodRegistry = new Map();
+  for (const method of schema.methods || []) {
+    methodRegistry.set(method.name, method);
   }
   return methodRegistry;
 }
@@ -281,17 +359,22 @@ server.registerTool("poll_events", {
   },
 }, async ({ after, windowId }) => {
   const params = {};
-  if (after !== undefined) params.after = after;
+  if (after !== undefined) params.since = after;
   if (windowId) params.windowId = windowId;
   return text(await rpc("Event.poll", params));
 });
 
-process.on("exit", () => {
-  // Explicit-launch cleanup: the host owns its windows; taking it down with
-  // the adapter prevents orphaned controlled instances.
-  if (launched && !launched.killed) launched.kill();
-});
-
+let closing = false;
+async function shutdown() {
+  if (closing) return;
+  closing = true;
+  await closeSession();
+  process.exit(0);
+}
+server.server.onclose = shutdown;
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+process.stdin.on("end", shutdown);
 await server.connect(new StdioServerTransport());
 console.error(`tabengine-mcp: serving ${endpoint} (mutations ${
   allowMutations ? "allowed" : "refused"})`);
