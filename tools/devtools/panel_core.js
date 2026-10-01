@@ -73,9 +73,24 @@ export function createRpcClient(transport, policy = {}) {
     ? transport.fetchBytes : null;
   let token = "";
   let nextId = 1;
-  let epoch = 0;
+  let epoch = 0;        // connection generation: reconnect discards everything
+  let targetEpoch = 0;  // target generation: window/tab switch discards results
+                        // but keeps in-flight fetches running (same connection)
   let sessionId = "";
+  let sessionBegin = null; // single-flight promise for concurrent renewals
   const inFlight = new Set();
+  // Target-generation waiters: a target switch resolves these so callers
+  // waiting on a late response stop at once (the response, if it arrives,
+  // is discarded by the epoch check).
+  const targetWaiters = new Set();
+  const waitTargetChange = (since) => new Promise((resolve) => {
+    const waiter = () => {
+      targetWaiters.delete(waiter);
+      resolve(null);
+    };
+    waiter.since = since;
+    targetWaiters.add(waiter);
+  });
   const sessionHeaders = () => {
     const headers = { "Authorization": "Bearer " + token,
                       "Content-Type": "application/json" };
@@ -99,44 +114,72 @@ export function createRpcClient(transport, policy = {}) {
     clearToken() { token = ""; },
     get sessionId() { return sessionId; },
     get epoch() { return epoch; },
+    get targetEpoch() { return targetEpoch; },
     // Advances the connection epoch: every in-flight call still running
     // under an older epoch resolves as stale and its result is discarded
     // by the caller, so a reconnecting panel never mixes results from two
     // instances. Also aborts the in-flight fetches themselves.
     newEpoch() {
       epoch += 1;
+      targetEpoch = 0; // a new connection starts a fresh target space
       sessionId = "";
+      sessionBegin = null;
       for (const controller of inFlight) controller.abort();
       inFlight.clear();
     },
+    // Advances the target epoch: results captured under an older target
+    // resolve as stale (callers check result.stale against their captured
+    // targetEpoch) so a late tree/screenshot/input result never lands on
+    // the newly selected window or tab. In-flight fetches keep running on
+    // the same connection; their responses are simply refused at the
+    // caller. Multi-step write flows compare the returned targetEpoch with
+    // the one they started with after every await.
+    newTargetEpoch() {
+      targetEpoch += 1;
+      for (const waiter of [...targetWaiters]) {
+        if (waiter.since < targetEpoch) waiter();
+      }
+      return targetEpoch;
+    },
     // Begins one logical session (raw input gestures keep one connection
     // identity across down/move/up). Existing sessions are replaced.
+    // Concurrent callers share one in-flight begin (single-flight): two
+    // 404-renewals racing must not create two sessions or overwrite each
+    // other's id with an older one.
     async beginSession() {
       if (!token) return { ok: false, error: "no token" };
-      const attemptEpoch = epoch;
-      let response;
+      if (sessionBegin) return sessionBegin;
+      sessionBegin = (async () => {
+        const attemptEpoch = epoch;
+        let response;
+        try {
+          response = await rawFetch(SESSION_PATH, {
+            method: "POST",
+            headers: { "Authorization": "Bearer " + token },
+            body: "",
+            timeoutS: 10,
+          });
+        } catch (_) {
+          return { ok: false, stale: epoch !== attemptEpoch,
+                   error: "session begin failed: network error" };
+        }
+        if (epoch !== attemptEpoch) return { ok: false, stale: true, error: "stale epoch" };
+        if (response.status !== 200) {
+          return { ok: false, error: "session begin failed: http " + response.status };
+        }
+        try {
+          sessionId = String(JSON.parse(response.body).sessionId || "");
+        } catch (_) {
+          return { ok: false, error: "session begin returned invalid JSON" };
+        }
+        if (!sessionId) return { ok: false, error: "session begin returned no id" };
+        return { ok: true, sessionId };
+      })();
       try {
-        response = await rawFetch(SESSION_PATH, {
-          method: "POST",
-          headers: { "Authorization": "Bearer " + token },
-          body: "",
-          timeoutS: 10,
-        });
-      } catch (_) {
-        return { ok: false, stale: epoch !== attemptEpoch,
-                 error: "session begin failed: network error" };
+        return await sessionBegin;
+      } finally {
+        sessionBegin = null;
       }
-      if (epoch !== attemptEpoch) return { ok: false, stale: true, error: "stale epoch" };
-      if (response.status !== 200) {
-        return { ok: false, error: "session begin failed: http " + response.status };
-      }
-      try {
-        sessionId = String(JSON.parse(response.body).sessionId || "");
-      } catch (_) {
-        return { ok: false, error: "session begin returned invalid JSON" };
-      }
-      if (!sessionId) return { ok: false, error: "session begin returned no id" };
-      return { ok: true, sessionId };
     },
     // Ends the session explicitly (disconnect): releases any held input.
     async endSession() {
@@ -175,18 +218,28 @@ export function createRpcClient(transport, policy = {}) {
         params,
       });
       const attemptEpoch = epoch;
+      const attemptTargetEpoch = targetEpoch;
       let response = null;
       try {
-        response = await rawFetch(RPC_PATH, {
-          method: "POST",
-          headers: sessionHeaders(),
-          body,
-          timeoutS,
-        });
+        // The target wait only breaks the await when the target moved; the
+        // eventual HTTP result is then refused by the epoch check below.
+        response = await Promise.race([
+          rawFetch(RPC_PATH, {
+            method: "POST",
+            headers: sessionHeaders(),
+            body,
+            timeoutS,
+          }),
+          waitTargetChange(attemptTargetEpoch),
+        ]);
+        if (response === null) {
+          return { ok: false, stale: true,
+                   error: { code: 0, message: "stale target" } };
+        }
       } catch (error) {
         // A response from a dead epoch is stale even when the fetch itself
         // aborted: discard it instead of surfacing a network error.
-        if (epoch !== attemptEpoch) {
+        if (epoch !== attemptEpoch || targetEpoch !== attemptTargetEpoch) {
           return { ok: false, stale: true, error: { code: 0, message: "stale epoch" } };
         }
         // Network failure: the request may or may not have been dispatched,
@@ -207,9 +260,9 @@ export function createRpcClient(transport, policy = {}) {
           return { ok: false, error: { code: 0, message: "network error" } };
         }
       }
-      // The response belongs to a previous connection: discard it - the
-      // caller already moved on (reconnect switched windows/targets).
-      if (epoch !== attemptEpoch) {
+      // The response belongs to a previous connection or target: discard it
+      // - the caller already moved on (reconnect / window or tab switch).
+      if (epoch !== attemptEpoch || targetEpoch !== attemptTargetEpoch) {
         return { ok: false, stale: true, error: { code: 0, message: "stale epoch" } };
       }
       if (response.status === 401) {
@@ -222,11 +275,15 @@ export function createRpcClient(transport, policy = {}) {
       // so a session-expired reply means the request never ran. Drop the
       // dead session, begin a new one, and replay the same request exactly
       // once - safe for mutations too, because the request never dispatched.
+      // A target change during the renewal also cancels the replay: the
+      // expired request belongs to the old target and must not run there.
       if (isSessionInvalid(response) && !sessionRetried) {
         const attemptEpoch = epoch;
+        const attemptTargetEpoch = targetEpoch;
         sessionId = "";
         const begun = await this.beginSession();
-        if (begun.ok && epoch === attemptEpoch) {
+        if (begun.ok && epoch === attemptEpoch &&
+            targetEpoch === attemptTargetEpoch) {
           return this.call(method, params, timeoutS,
                            { retryOnNetworkError, sessionRetried: true });
         }
@@ -243,7 +300,10 @@ export function createRpcClient(transport, policy = {}) {
       if (envelope.error) {
         return { ok: false, error: envelope.error };
       }
-      return { ok: true, result: envelope.result };
+      // The target generation the request belongs to: multi-step flows
+      // (focus-then-type, screenshot-then-click) compare this with their
+      // starting value after every await and stop when the target moved.
+      return { ok: true, result: envelope.result, targetEpoch };
     },
     artifactUrl(id) {
       // The fetch for artifacts adds the header at request time; callers

@@ -160,6 +160,68 @@ const OK = (result) => ({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id
   check(client.sessionId === "sess-2", "client carries the renewed session");
 }
 
+// Concurrent session expiry: two 404-renewals racing share ONE begin
+// (single-flight); no second session is created and the id is not
+// overwritten by an older response.
+{
+  let sessionCount = 0;
+  const transport = makeTransport({
+    "POST /automation/v1/session": () => {
+      sessionCount += 1;
+      return { status: 200, body: '{"sessionId":"sess-' + sessionCount + '"}' };
+    },
+    default: (options) => {
+      // Only the pre-renewal session id is dead; requests carrying the
+      // renewed session dispatch normally.
+      const header = options.headers[SESSION_HEADER] || "";
+      if (header === "sess-1" || header === "") {
+        return { status: 404, body: '{"error":"session not found or expired"}' };
+      }
+      return { status: 200,
+               body: '{"jsonrpc":"2.0","id":"1","result":{"replayed":true}}' };
+    },
+  });
+  const client = createRpcClient(transport);
+  client.setToken("token");
+  await client.beginSession(); // sess-1
+  const first = client.call("Input.click", { windowId: "1" });
+  const second = client.call("Input.key", {});
+  const [a, b] = await Promise.all([first, second]);
+  check(a.ok && b.ok, "both racing calls recover through the shared renewal");
+  check(sessionCount === 2, "concurrent renewals create exactly one new session");
+  check(client.sessionId === "sess-2", "no older session overwrites the renewed id");
+}
+
+// ---- target epoch: late results never land on the new target --------------
+{
+  const transport = makeTransport({
+    default: { status: 200, never: true },
+  });
+  const client = createRpcClient(transport);
+  client.setToken("token");
+  check(client.targetEpoch === 0, "target generation starts at zero");
+  const slowTree = client.call("UI.snapshot", { windowId: "1" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The operator switches window: a NEW target generation, same connection.
+  const generation = client.newTargetEpoch();
+  check(client.targetEpoch === 1 && generation === 1 && client.epoch === 0,
+        "target switch advances only the target generation");
+  const settled = await slowTree;
+  check(!settled.ok && settled.stale,
+        "a tree result from the previous target resolves stale");
+  // A result that completes after the switch carries its own generation so
+  // multi-step flows can compare instead of guessing.
+  transport.responses.default = { status: 200,
+    body: '{"jsonrpc":"2.0","id":"1","result":{}}' };
+  const late = await client.call("Capture.screenshot", { windowId: "1" });
+  check(late.ok && late.targetEpoch === 1,
+        "results carry the target generation they belong to");
+  check(late.targetEpoch !== 0,
+        "a generation-0 screenshot is detectably from the old target");
+}
+
+// ---- session renewal is single-flight -------------------------------------
+
 // ---- connection epoch -----------------------------------------------------
 {
   const transport = makeTransport({

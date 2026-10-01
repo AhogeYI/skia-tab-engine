@@ -248,7 +248,12 @@ async function refreshTabs() {
     select.disabled = true;
     return;
   }
-  const result = await rpc.call("Tab.list", { windowId: state.windowId });
+  // The listing belongs to the target captured here; a switch during the
+  // await must not repaint the dropdown with the old window's tabs.
+  const targetEpoch = rpc.targetEpoch;
+  const windowId = state.windowId;
+  const result = await rpc.call("Tab.list", { windowId });
+  if (rpc.targetEpoch !== targetEpoch) return;
   if (!result.ok) {
     select.disabled = true;
     return;
@@ -265,8 +270,12 @@ async function refreshTabs() {
 }
 async function refreshTree() {
   if (!state.windowId) { $("tree").replaceChildren(el("div", "no windows", "muted")); return; }
+  // Snapshot ownership: a late snapshot from the previous target resolves
+  // stale and never replaces the newly selected target's tree.
+  const targetEpoch = rpc.targetEpoch;
   const params = { windowId: state.windowId };
   const result = await rpc.call("UI.snapshot", params, 10, { retryOnNetworkError: true });
+  if (result.stale || rpc.targetEpoch !== targetEpoch) return;
   if (!result.ok) {
     $("tree").replaceChildren(el("div", "snapshot failed: " + result.error.message, "muted"));
     return;
@@ -281,6 +290,11 @@ async function refreshTree() {
 async function switchWindow(windowId) {
   if (String(state.windowId) === String(windowId)) return;
   clearTargetData(); // old window's tree/shot/selection never leak
+  // A target change advances the target generation: in-flight results from
+  // the old window/tab resolve stale at their await points and every
+  // multi-step flow stops instead of writing into the new target.
+  rpc.newTargetEpoch();
+  stopTracking("target changed");
   state.windowId = windowId;
   const window = state.windows.find((w) => idOf(w) === String(windowId));
   state.scale = window && window.scale ? Number(window.scale) : 1;
@@ -299,6 +313,8 @@ async function switchTab(tabId) {
     return;
   }
   clearTargetData();
+  rpc.newTargetEpoch();
+  stopTracking("target changed");
   await refreshTree();
 }
 function nodeTitle(node) {
@@ -358,20 +374,37 @@ function selectNode(node, row) {
 async function performNodeAction(node, action) {
   const check = gate.check({ mutating: true });
   if (!check.permitted) { toast(check.reason, true); return; }
+  // The whole multi-step flow belongs to the target captured here: every
+  // await re-checks the generation and every step addresses the same
+  // windowId, so a target switch mid-flow stops the remaining steps
+  // instead of typing into the newly selected window.
+  const targetEpoch = rpc.targetEpoch;
+  const windowId = state.windowId;
+  const stopIfTargetMoved = (step) => {
+    if (rpc.targetEpoch !== targetEpoch) {
+      toast("target changed - " + step + " cancelled", true);
+      return true;
+    }
+    return false;
+  };
   if (action === "click") {
-    const params = nodeClickParams(state.windowId, node, state.snapshot);
+    const params = nodeClickParams(windowId, node, state.snapshot);
     const result = await rpc.call("Input.click", params);
+    if (result.stale || stopIfTargetMoved("click")) return;
     if (result.ok) { toast("clicked node " + nodeTitle(node)); await refreshTree(); }
     else toast("click failed: " + result.error.message, true);
   } else if (action === "type") {
     const text = prompt("text to type");
     if (text === null) return;
     // The engine routes typeText to the focused element: click the node
-    // first (strict, layout-revision-pinned), then deliver the text.
+    // first (strict, layout-revision-pinned), then deliver the text - both
+    // addressed to the captured window, both re-checked after each await.
     const focused = await rpc.call("Input.click",
-      nodeClickParams(state.windowId, node, state.snapshot));
+      nodeClickParams(windowId, node, state.snapshot));
+    if (focused.stale || stopIfTargetMoved("focus")) return;
     if (!focused.ok) { toast("focus failed: " + focused.error.message, true); return; }
-    const result = await rpc.call("Input.typeText", { windowId: state.windowId, text });
+    const result = await rpc.call("Input.typeText", { windowId, text });
+    if (result.stale || stopIfTargetMoved("type")) return;
     if (!result.ok) toast("type failed: " + result.error.message, true);
   }
 }
@@ -379,12 +412,17 @@ async function performNodeAction(node, action) {
 // ---- capture & input ----------------------------------------------------
 async function capture() {
   if (!state.windowId) { toast("select a window first", true); return; }
+  // The screenshot belongs to the target captured here: if the target or
+  // connection moved between the two awaits, the image is dropped instead
+  // of showing window A's pixels over a window B selection.
+  const targetEpoch = rpc.targetEpoch;
+  const windowId = state.windowId;
   const result = await rpc.call("Capture.screenshot",
-    { windowId: state.windowId, frame: "fresh" });
+    { windowId, frame: "fresh" });
   if (!result.ok) { toast("capture failed: " + result.error.message, true); return; }
   const artifact = await rpc.fetchArtifact(result.result.artifactId);
   if (!artifact.ok) { toast(artifact.error, true); return; }
-  if (artifact.stale) return; // connection changed mid-capture
+  if (artifact.stale || rpc.targetEpoch !== targetEpoch) return; // moved mid-capture
   if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
   state.shot = {
     meta: result.result,
@@ -419,14 +457,27 @@ function drawOverlay() {
 }
 async function imageClick(event) {
   if (!state.shot) return;
+  // The click belongs to the shot's target: capture the generation and
+  // window here so a target switch between hover and dispatch never sends
+  // window A's coordinates to window B.
+  const targetEpoch = rpc.targetEpoch;
+  const windowId = state.windowId;
   const rect = $("shot").getBoundingClientRect();
   const px = (event.clientX - rect.left) * ($("shot").naturalWidth / rect.width);
   const py = (event.clientY - rect.top) * ($("shot").naturalHeight / rect.height);
   const point = imageToClient(px, py, state.shot.meta);
   const gateCheck = gate.check({ mutating: true });
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); return; }
+  if (rpc.targetEpoch !== targetEpoch) {
+    logInput("click dropped: target changed after capture");
+    return;
+  }
   const result = await rpc.call("Input.click",
-    { windowId: state.windowId, x: point.x, y: point.y });
+    { windowId, x: point.x, y: point.y });
+  if (result.stale || rpc.targetEpoch !== targetEpoch) {
+    logInput("click result discarded: target changed");
+    return;
+  }
   logInput("click -> " + point.x.toFixed(1) + "," + point.y.toFixed(1) +
            ": " + (result.ok ? "ok" : result.error.message));
 }
