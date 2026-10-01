@@ -1,5 +1,36 @@
 # Release notes
 
+## 0.3.0
+
+Protocol version stays `1.0`; consumers recompile against the new package.
+
+### Web devtools panel
+
+- The transport serves an unauthenticated static entry for the panel shell
+  (GET only, still behind the loopback/Origin boundary; the shell carries no
+  secrets) while every data and action request keeps using the authenticated
+  routes. `DevtoolsPanel::mount` wires `tools/devtools` from the SDK onto
+  `<endpoint>/automation/v1/panel`.
+- The panel is dependency-free HTML/CSS/JS: connection status, window/tab/
+  node inspection with details and bounds overlay on the screenshot,
+  capture with DPI-correct click mapping, controlled input behind an
+  explicit write toggle, the schema-driven method catalog with structured
+  results, operation tracking with cooperative cancel, and bounded
+  event/log polling with a redacted diagnostics download. The token lives
+  in page memory only.
+- Browser `Origin` headers (full URL form) are now accepted for loopback
+  origins; foreign origins stay refused.
+
+### Tools ship with the SDK
+
+- `tools/devtools` (panel) and `tools/mcp` (adapter, production
+  dependencies vendored from the committed lockfile) are packaged with the
+  SDK and declared in `manifest.json` under `tools` with versions and entry
+  points. SDK `verify` now covers both: panel logic regression, adapter
+  load from a spaced directory, and a live MCP selfcheck against the
+  packaged demo.
+- The MCP adapter is versioned 0.3.0 to match.
+
 ## 0.2.0
 
 Protocol version stays `1.0`; the SDK version moves because the public

@@ -234,6 +234,25 @@ path-qualified (`params.windowId: expected string`).
   leftovers and releasing held input. All socket reads and writes run
   against an absolute deadline; a trickling client cannot extend its
   budget, and slow clients never block other connections or `stop()`.
+- Host-mounted routes: `set_route_handler` serves extra paths behind the
+  same token/framing/loopback boundary (status 0 declines; the engine
+  answers 404). Replies may set `cache_control`.
+- Unauthenticated static entry: `set_public_file_handler` answers GET
+  requests after the loopback/Origin boundary but before auth, for the
+  devtools panel shell only. Unhandled paths fall through to normal auth
+  processing.
+
+## devtools.h - the web panel mount
+
+- `DevtoolsPanel::mount(transport, options)`: serves `panel.html` at
+  `options.mount_path` (`/automation/v1/panel`) plus whitelisted
+  single-segment assets under `/assets/` from `options.resources_root`.
+  Replies are `no-store` with `nosniff`, reads are bounded
+  (`kMaxFileBytes`), traversal-shaped names are refused rather than
+  resolved, and the shell never embeds secrets. False when the resources
+  root has no `panel.html` (hosts treat that as "panel not shipped").
+  Data, action, and artifact requests from the page authenticate like any
+  other client.
 
 ## render.h - capture capability
 
