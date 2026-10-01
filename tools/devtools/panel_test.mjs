@@ -1,12 +1,17 @@
 // Headless logic regression for the devtools panel core (no browser, no
 // dependencies). Run: node tools/devtools/panel_test.mjs
 // Covers: token policy (memory only, never in a URL), JSON-RPC client
-// error surfaces, event cursor gap semantics, DPI coordinate mapping,
-// the write gate, and diagnostics redaction.
+// error surfaces, logical input sessions (begin, header attach, expiry
+// replay, explicit end), connection epochs (stale results discarded,
+// in-flight aborted), key-name normalization against the real bridge
+// table, per-source log cursors, event cursor gap semantics, DPI
+// coordinate mapping, the write gate at the dispatch boundary, and
+// diagnostics redaction.
 import {
-  createRpcClient, createEventCursor, imageToClient, createMutationGate,
-  redact, diagnosticsSnapshot, RPC_PATH, ARTIFACT_PATH,
-  nodeClickParams, keyParams, wheelParams,
+  createRpcClient, createEventCursor, createLogCursor, imageToClient,
+  createMutationGate, redact, diagnosticsSnapshot, normalizeKeyName,
+  RPC_PATH, ARTIFACT_PATH, SESSION_PATH, SESSION_HEADER,
+  nodeClickParams, wheelParams,
 } from "./panel_core.js";
 
 let failures = 0;
@@ -28,6 +33,19 @@ function makeTransport(responses) {
     const responder = responses[key] || responses.default ||
       (() => ({ status: 404, body: "" }));
     const out = typeof responder === "function" ? responder(options) : responder;
+    if (out && out.never) {
+      // Deferred response for in-flight/epoch scenarios; a real fetch
+      // would reject when the caller's signal aborts, so mirror that.
+      return new Promise((resolve, reject) => {
+        out.resolve = resolve;
+        const signal = options.signal;
+        if (signal) {
+          if (signal.aborted) reject(new Error("The operation was aborted"));
+          else signal.addEventListener("abort",
+            () => reject(new Error("The operation was aborted")), { once: true });
+        }
+      });
+    }
     return out;
   };
   const fetchBytes = async (path, options) => {
@@ -39,8 +57,10 @@ function makeTransport(responses) {
     return { status: out.status, bytes: out.bytes instanceof ArrayBuffer
       ? out.bytes : new TextEncoder().encode(out.body || "").buffer };
   };
-  return { requests, fetchText, fetchBytes };
+  return { requests, fetchText, fetchBytes, responses };
 }
+
+const OK = (result) => ({ status: 200, body: JSON.stringify({ jsonrpc: "2.0", id: "1", result }) });
 
 // ---- token policy --------------------------------------------------------
 {
@@ -73,6 +93,156 @@ function makeTransport(responses) {
   check(transport.requests[0].path === RPC_PATH, "rpc hits the engine route");
   check(transport.requests[1].path === ARTIFACT_PATH + "a1", "artifact path is id-only");
   check(transport.requests[1].binary, "artifacts use the binary channel");
+}
+
+// ---- logical input session ------------------------------------------------
+{
+  const transport = makeTransport({
+    "POST /automation/v1/session": { status: 200,
+      body: '{"sessionId":"sess-123","idleTimeoutS":30}' },
+    "DELETE /automation/v1/session": { status: 200, body: '{"ended":true}' },
+    default: { status: 200, body: '{"jsonrpc":"2.0","id":"1","result":{}}' },
+  });
+  const client = createRpcClient(transport);
+  client.setToken("token");
+  check(client.sessionId === "", "no session before begin");
+  const begun = await client.beginSession();
+  check(begun.ok && client.sessionId === "sess-123", "session begin stores the id");
+  check(transport.requests[0].path === SESSION_PATH &&
+        transport.requests[0].options.method === "POST",
+        "session begin hits the session route");
+  check(transport.requests[0].options.headers.Authorization === "Bearer token",
+        "session begin authenticates");
+  await client.call("Input.key");
+  const rpcRequest = transport.requests[1];
+  check(rpcRequest.options.headers[SESSION_HEADER] === "sess-123",
+        "rpc calls attach the session header");
+  const ended = await client.endSession();
+  check(ended.ok, "explicit session end succeeds");
+  const deleteRequest = transport.requests.find((r) =>
+    r.path === SESSION_PATH && r.options.method === "DELETE");
+  check(deleteRequest.options.headers[SESSION_HEADER] === "sess-123",
+        "session end carries the session header");
+  check(client.sessionId === "", "session id cleared after end");
+  await client.call("Input.key");
+  const afterEnd = transport.requests[transport.requests.length - 1];
+  check(afterEnd.options.headers[SESSION_HEADER] === undefined,
+        "calls after end run without a session header");
+}
+
+// Session expiry: the transport validates sessions BEFORE dispatching, so
+// the panel replays the exact request once after re-beginning (safe for
+// mutations too - the request never ran).
+{
+  let sessionCount = 0;
+  const transport = makeTransport({
+    "POST /automation/v1/session": () => {
+      sessionCount += 1;
+      return { status: 200, body: '{"sessionId":"sess-' + sessionCount + '"}' };
+    },
+    default: (options) => {
+      const header = options.headers[SESSION_HEADER] || "";
+      if (header === "sess-1") {
+        return { status: 404, body: '{"error":"session not found or expired"}' };
+      }
+      return { status: 200,
+               body: '{"jsonrpc":"2.0","id":"1","result":{"replayed":true}}' };
+    },
+  });
+  const client = createRpcClient(transport);
+  client.setToken("token");
+  await client.beginSession();
+  const result = await client.call("Input.click", { windowId: "1" });
+  check(result.ok && result.result.replayed, "expired session replays after renewal");
+  check(sessionCount === 2, "exactly one renewal");
+  const rpcs = transport.requests.filter((r) => r.path === RPC_PATH);
+  check(rpcs.length === 2, "the same request ran twice (first hit a dead session)");
+  check(client.sessionId === "sess-2", "client carries the renewed session");
+}
+
+// ---- connection epoch -----------------------------------------------------
+{
+  const transport = makeTransport({
+    default: { status: 200, never: true },
+  });
+  const client = createRpcClient(transport);
+  client.setToken("token");
+  const pending = client.call("System.getInfo");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const myAbort = transport.requests[0].options.signal;
+  check(typeof myAbort !== "string", "core hands a native AbortSignal to the transport");
+  client.newEpoch();
+  check(client.sessionId === "" && client.epoch === 1, "epoch advance clears the session");
+  check(myAbort.aborted, "epoch advance aborts the in-flight request");
+  const settled = await pending;
+  check(!settled.ok && settled.stale, "in-flight result resolves stale, never rendered");
+  // A completed result from the old epoch is discarded the same way.
+  const stale = { status: 200, never: false,
+                  body: '{"jsonrpc":"2.0","id":"1","result":{"old":true}}' };
+  transport.responses.default = stale;
+  const oldCall = client.call("System.getInfo");
+  // Simulate a reconnect that starts between dispatch and response.
+  client.newEpoch();
+  const outcome = await oldCall;
+  check(!outcome.ok && outcome.stale, "late old-epoch response is discarded");
+}
+
+// ---- key-name normalization (real bridge table contract) ------------------
+{
+  const enter = normalizeKeyName("Enter");
+  check(enter.ok && enter.key === "enter", "Enter normalizes to the table name");
+  const f4 = normalizeKeyName("F4");
+  check(f4.ok && f4.key === "f4", "F4 normalizes to lowercase");
+  const chord = normalizeKeyName("Ctrl+Shift+S");
+  check(chord.ok && chord.key === "s" && chord.ctrl && chord.shift && !chord.alt,
+        "chords split into the key plus modifier flags");
+  const left = normalizeKeyName("ArrowLeft");
+  check(left.ok && left.key === "arrowleft", "ArrowLeft maps to the logical name");
+  const modifier = normalizeKeyName("ControlLeft");
+  check(!modifier.ok && /modifier flag/.test(modifier.reason),
+        "standalone modifier keys report unsupported instead of faking success");
+  const unknown = normalizeKeyName("F13");
+  check(!unknown.ok, "unknown keys refuse");
+  const digits = normalizeKeyName("5");
+  check(digits.ok && digits.key === "5", "single digits pass through");
+}
+
+// ---- per-source log cursor ------------------------------------------------
+{
+  const cursor = createLogCursor();
+  let params = cursor.nextParams(200);
+  check(params.after === 0 && params.appAfter === 0, "first read starts at zero");
+  const applied = cursor.apply({ sources: {
+    engine: { records: [
+      { sequence: 1, level: "info", message: "a" },
+      { sequence: 3, level: "error", message: "b" },
+    ], next: 3 },
+    app: { records: [{ sequence: 2, level: "debug", message: "c" }], next: 2 },
+  } });
+  check(applied.records.length === 3, "all records accepted on first read");
+  check(cursor.positions.engine === 3 && cursor.positions.app === 2,
+        "cursors advance per source to the server next");
+  params = cursor.nextParams(200);
+  check(params.after === 3 && params.appAfter === 2,
+        "next read resumes per source instead of after=0");
+  const duplicate = cursor.apply({ sources: {
+    engine: { records: [{ sequence: 3, level: "info", message: "dup" }], next: 3 },
+  } });
+  check(duplicate.records.length === 0, "replayed records do not duplicate");
+  // Level filter: warnings and errors pass, debug is hidden, but the cursor
+  // still advances past hidden records.
+  cursor.setMinLevel("warning");
+  const filtered = cursor.apply({ sources: {
+    engine: { records: [
+      { sequence: 4, level: "debug", message: "hidden" },
+      { sequence: 5, level: "warning", message: "shown" },
+    ], next: 5 },
+  } });
+  check(filtered.records.length === 1 && filtered.records[0].record.message === "shown",
+        "level filter hides below-minimum records");
+  check(cursor.positions.engine === 5, "hidden records still advance the cursor");
+  cursor.reset();
+  check(cursor.nextParams(1).after === 0, "reset restarts history for level changes");
 }
 
 // ---- rpc error surfaces --------------------------------------------------
@@ -126,6 +296,8 @@ function makeTransport(responses) {
   check(applied.events.length === 0 && cursor.since === 41, "duplicates do not replay");
   applied = cursor.apply({ gap: true, events: [], next: 41, oldestAvailable: 60 });
   check(applied.gapped && cursor.since === 59, "fully trimmed ring advances beyond lost history");
+  cursor.reset();
+  check(cursor.since === 0 && cursor.gapCount === 0, "reset restarts the cursor on reconnect");
 }
 
 // ---- coordinate mapping (DPI) ---------------------------------------------
@@ -145,8 +317,6 @@ function makeTransport(responses) {
 {
   const click = nodeClickParams("1", { node: "4" }, { revision: 99, layoutRevision: 7 });
   check(click.snapshotId === 7 && click.strict, "strict clicks use layoutRevision");
-  const key = keyParams("1", "Enter", "down");
-  check(key.kind === "down" && !("action" in key), "key uses required kind field");
   const wheel = wheelParams("1", -2, { x: 30.2, y: 50.8 });
   check(wheel.deltaY === -240 && wheel.x === 30 && wheel.y === 51,
         "wheel sends a client position and native delta");

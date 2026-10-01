@@ -2,11 +2,15 @@
 // textContent (never innerHTML with data), the token lives in the RPC
 // client's memory only, and every request the panel makes flows through
 // the authenticated routes of the transport that served this page.
+// Raw input gestures (pointer down/move/up, key down/up, IME) ride one
+// logical session created at connect and released at disconnect; a
+// connection epoch discards every in-flight result from a previous
+// session so a reconnect never mixes instances.
 import {
-  createRpcClient, createEventCursor, createMutationGate,
-  imageToClient, redact, diagnosticsSnapshot,
-  nodeClickParams, keyParams, wheelParams,
-} from "./panel_core.js";
+  createRpcClient, createEventCursor, createLogCursor, createMutationGate,
+  imageToClient, redact, diagnosticsSnapshot, normalizeKeyName,
+  nodeClickParams, wheelParams, SESSION_HEADER,
+} from "{{MOUNT}}/assets/panel_core.js";
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, text, cls) => {
@@ -19,11 +23,19 @@ const el = (tag, text, cls) => {
 // ---- transport adapter -------------------------------------------------
 // The panel is usually served by the target itself; typing another loopback
 // endpoint retargets the same page (data requests then cross an origin,
-// which the transport refuses for non-loopback hosts by design).
+// which the transport refuses for non-loopback hosts by design). The core
+// hands us its own abort signal per request; the timeout aborts too, and
+// either source cancels the fetch.
 let endpoint = location.origin;
 function fetchText(path, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), (options.timeoutS || 10) * 1000);
+  const external = options.signal;
+  const onAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", onAbort);
+  }
   return fetch(endpoint + path, {
     method: options.method,
     headers: options.headers,
@@ -32,12 +44,21 @@ function fetchText(path, options) {
   }).then(async (response) => {
     const body = await response.text();
     return { status: response.status, body };
-  }).finally(() => clearTimeout(timer));
+  }).finally(() => {
+    clearTimeout(timer);
+    if (external) external.removeEventListener("abort", onAbort);
+  });
 }
 // Artifacts are binary (PNG); text decoding would corrupt them.
 function fetchBytes(path, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), (options.timeoutS || 15) * 1000);
+  const external = options.signal;
+  const onAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", onAbort);
+  }
   return fetch(endpoint + path, {
     method: options.method,
     headers: options.headers,
@@ -45,7 +66,10 @@ function fetchBytes(path, options) {
   }).then(async (response) => {
     const bytes = await response.arrayBuffer();
     return { status: response.status, bytes };
-  }).finally(() => clearTimeout(timer));
+  }).finally(() => {
+    clearTimeout(timer);
+    if (external) external.removeEventListener("abort", onAbort);
+  });
 }
 
 const gate = createMutationGate();
@@ -56,13 +80,15 @@ const rpc = createRpcClient({ fetchText, fetchBytes }, {
   },
 });
 const events = createEventCursor();
+const logs = createLogCursor();
 let activeToken = "";
 const state = {
   info: null, schema: null, connected: false,
   windows: [], windowId: null, scale: 1,
   snapshot: null, selectedNode: null,
-  shot: null, // {meta, bytes, objectUrl, imgSize}
-  polling: null, logs: [],
+  shot: null, // {meta, bytes, objectUrl}
+  polling: null,
+  tracking: null, // {operationId, epoch}
 };
 
 function secrets() {
@@ -77,7 +103,26 @@ function toast(message, isError) {
   toast.timer = setTimeout(() => { box.hidden = true; }, 4200);
 }
 
-// ---- connection ---------------------------------------------------------
+// ---- target switching ----------------------------------------------------
+// Every target change drops the data of the old target first: tree,
+// selection, and screenshot belong to one window at a time.
+function clearTargetData() {
+  state.snapshot = null;
+  state.selectedNode = null;
+  $("tree").replaceChildren();
+  $("node-details").textContent = "select a node";
+  $("node-actions").replaceChildren();
+  $("snapshot-meta").textContent = "";
+  if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
+  state.shot = null;
+  $("shot").removeAttribute("src");
+  $("shot-empty").hidden = false;
+  $("shot-meta").textContent = "";
+  sizeOverlay();
+}
+function idOf(window) { return String(window.windowId ?? window.id); }
+
+// ---- connection ----------------------------------------------------------
 function setStatus(text, cls) {
   const node = $("conn-status");
   node.textContent = text;
@@ -85,17 +130,25 @@ function setStatus(text, cls) {
 }
 async function connect() {
   endpoint = $("endpoint").value.trim() || location.origin;
+  // A new connection is a new epoch: in-flight results from the previous
+  // session resolve as stale and are discarded, never rendered.
+  rpc.newEpoch();
+  stopPolling();
+  stopTracking("connection changed");
   activeToken = $("token").value;
   rpc.setToken(activeToken);
   if (!rpc.hasToken()) { toast("enter the control token first", true); return; }
-  const info = await rpc.call("System.getInfo");
+  const info = await rpc.call("System.getInfo", {}, 10, { retryOnNetworkError: true });
   if (!info.ok) {
     state.connected = false;
     setStatus("auth failed", "bad");
     toast("connect failed: " + (info.error && info.error.message), true);
     return;
   }
-  const schema = await fetchSchema();
+  // One logical session for the whole panel: raw input gestures keep one
+  // connection identity across down/move/up, and disconnect releases it.
+  const session = await rpc.beginSession();
+  const schema = await rpc.fetchSchema();
   if (!schema.ok) { toast("schema fetch failed: " + schema.error, true); return; }
   state.info = info.result;
   state.schema = schema.result;
@@ -107,60 +160,99 @@ async function connect() {
     (identity.application || "app") + " " + (identity.appVersion || "") +
     " · engine " + (identity.engineVersion || "?") +
     " · " + (identity.protocolVersion ? "protocol " + identity.protocolVersion : "") +
-    " · " + (identity.instanceId || "");
+    " · " + (identity.instanceId || "") +
+    (session.ok ? " · session live" : " · no input session (" + session.error + ")");
   $("connect").disabled = true;
   $("disconnect").disabled = false;
+  events.reset();
+  logs.reset();
   await refreshWindows();
   renderMethodList();
 }
-async function fetchSchema() {
-  const response = await fetchText("/automation/v1/schema", {
-    method: "GET", headers: { "Authorization": "Bearer " + $("token").value }, body: "",
-  });
-  if (response.status !== 200) return { ok: false, error: "http " + response.status };
-  try { return { ok: true, result: JSON.parse(response.body) }; }
-  catch (_) { return { ok: false, error: "invalid schema JSON" }; }
-}
 function disconnect() {
   stopPolling();
+  stopTracking("disconnected");
+  // Release the logical session first so the server drops held input
+  // while the token is still set; then advance the epoch.
+  rpc.endSession();
+  rpc.newEpoch();
   rpc.clearToken();
   gate.setAllowed(false);
   $("allow-write").checked = false;
   $("token").value = "";
   activeToken = "";
-  if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
   state.connected = false;
-  state.info = null; state.schema = null; state.snapshot = null; state.shot = null;
+  state.info = null; state.schema = null;
+  clearTargetData();
   setStatus("disconnected");
   $("connect").disabled = false;
   $("disconnect").disabled = true;
   $("conn-info").textContent = "";
-  $("tree").replaceChildren();
-  $("node-details").textContent = "select a node";
   $("method-list").replaceChildren();
-  $("shot-empty").hidden = false;
-  $("shot").removeAttribute("src");
-  state.selectedNode = null;
+  $("window-select").replaceChildren(el("option", "no window", "", ""));
+  $("tab-select").replaceChildren(el("option", "-", "", ""));
+  $("window-select").disabled = true;
+  $("tab-select").disabled = true;
   state.windowId = null;
+  state.windows = [];
+  logs.reset();
+  events.reset();
+  $("logs-list").replaceChildren();
+  $("events-list").replaceChildren();
 }
 
-// ---- inspect ------------------------------------------------------------
+// ---- inspect -------------------------------------------------------------
 async function refreshWindows() {
-  const result = await rpc.call("Window.list");
+  const result = await rpc.call("Window.list", {}, 10, { retryOnNetworkError: true });
   if (!result.ok) { toast("Window.list failed: " + result.error.message, true); return; }
   state.windows = result.result.windows || [];
-  const idOf = (w) => String(w.windowId ?? w.id);
-  if (!state.windows.some((w) => idOf(w) === String(state.windowId))) {
+  const select = $("window-select");
+  select.replaceChildren();
+  for (const window of state.windows) {
+    const label = "#" + idOf(window) + " " + (window.title || "");
+    const option = el("option", label);
+    option.value = idOf(window);
+    select.append(option);
+  }
+  select.disabled = state.windows.length === 0;
+  const keep = state.windows.some((w) => idOf(w) === String(state.windowId));
+  if (!keep) {
     const first = state.windows[0];
     state.windowId = first ? idOf(first) : null;
     state.scale = first && first.scale ? Number(first.scale) : 1;
+    if (first) select.value = idOf(first);
+  } else if (state.windowId !== null) {
+    select.value = String(state.windowId);
   }
+  await refreshTabs();
   await refreshTree();
+}
+async function refreshTabs() {
+  const select = $("tab-select");
+  select.replaceChildren();
+  if (!state.windowId) {
+    select.disabled = true;
+    return;
+  }
+  const result = await rpc.call("Tab.list", { windowId: state.windowId });
+  if (!result.ok) {
+    select.disabled = true;
+    return;
+  }
+  const tabs = result.result.tabs || [];
+  for (const tab of tabs) {
+    const option = el("option", "#" + String(tab.tabId ?? tab.id) + " " + (tab.title || ""));
+    option.value = String(tab.tabId ?? tab.id);
+    select.append(option);
+  }
+  select.disabled = tabs.length === 0;
+  const active = result.result.activeTabId ?? result.result.activeTab;
+  if (active !== undefined && active !== null) select.value = String(active);
 }
 async function refreshTree() {
   if (!state.windowId) { $("tree").replaceChildren(el("div", "no windows", "muted")); return; }
   const params = { windowId: state.windowId };
-  const result = await rpc.call("UI.snapshot", params);
+  const result = await rpc.call("UI.snapshot", params, 10, { retryOnNetworkError: true });
   if (!result.ok) {
     $("tree").replaceChildren(el("div", "snapshot failed: " + result.error.message, "muted"));
     return;
@@ -171,6 +263,29 @@ async function refreshTree() {
     " · nodes " + (result.result.nodes ? result.result.nodes.length : 0) +
     (result.result.truncated ? " · truncated" : "");
   renderTree();
+}
+async function switchWindow(windowId) {
+  if (String(state.windowId) === String(windowId)) return;
+  clearTargetData(); // old window's tree/shot/selection never leak
+  state.windowId = windowId;
+  const window = state.windows.find((w) => idOf(w) === String(windowId));
+  state.scale = window && window.scale ? Number(window.scale) : 1;
+  await refreshTabs();
+  await refreshTree();
+}
+async function switchTab(tabId) {
+  // Selecting a tab is a mutating engine method: the write gate applies.
+  const gateCheck = gate.check({ mutating: true });
+  if (!gateCheck.permitted) { toast(gateCheck.reason, true); await refreshTabs(); return; }
+  const result = await rpc.call("Tab.select",
+    { windowId: state.windowId, tabId: String(tabId) });
+  if (!result.ok) {
+    toast("tab select failed: " + result.error.message, true);
+    await refreshTabs();
+    return;
+  }
+  clearTargetData();
+  await refreshTree();
 }
 function nodeTitle(node) {
   return (node.stableKey || node.name || node.role || "node");
@@ -184,7 +299,8 @@ function renderTree() {
       .filter(Boolean).join(" ").toLowerCase();
     if (filter && haystack.indexOf(filter) < 0) continue;
     const row = el("div", null, "node");
-    row.append(el("span", nodeTitle(node)));
+    const depth = Number(node.parent) ? "  " : "";
+    row.append(el("span", depth + nodeTitle(node)));
     row.append(el("span", node.role, "role"));
     if (!node.visible) row.classList.add("node-hidden");
     if (node.enabled === false) row.classList.add("node-disabled");
@@ -201,7 +317,8 @@ function selectNode(node, row) {
   details.replaceChildren();
   const rows = [
     ["key", node.stableKey], ["role", node.role], ["name", node.name],
-    ["ref", node.node], ["bounds", node.bounds && [node.bounds.x, node.bounds.y,
+    ["ref", node.node], ["parent", node.parent],
+    ["bounds", node.bounds && [node.bounds.x, node.bounds.y,
       node.bounds.width, node.bounds.height].join(", ")],
     ["visible", node.visible], ["enabled", node.enabled],
     ["focused", node.focused], ["selected", node.selected],
@@ -235,7 +352,10 @@ async function performNodeAction(node, action) {
   } else if (action === "type") {
     const text = prompt("text to type");
     if (text === null) return;
-    const focused = await rpc.call("Input.click", nodeClickParams(state.windowId, node, state.snapshot));
+    // The engine routes typeText to the focused element: click the node
+    // first (strict, layout-revision-pinned), then deliver the text.
+    const focused = await rpc.call("Input.click",
+      nodeClickParams(state.windowId, node, state.snapshot));
     if (!focused.ok) { toast("focus failed: " + focused.error.message, true); return; }
     const result = await rpc.call("Input.typeText", { windowId: state.windowId, text });
     if (!result.ok) toast("type failed: " + result.error.message, true);
@@ -244,11 +364,13 @@ async function performNodeAction(node, action) {
 
 // ---- capture & input ----------------------------------------------------
 async function capture() {
+  if (!state.windowId) { toast("select a window first", true); return; }
   const result = await rpc.call("Capture.screenshot",
     { windowId: state.windowId, frame: "fresh" });
   if (!result.ok) { toast("capture failed: " + result.error.message, true); return; }
   const artifact = await rpc.fetchArtifact(result.result.artifactId);
   if (!artifact.ok) { toast(artifact.error, true); return; }
+  if (artifact.stale) return; // connection changed mid-capture
   if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
   state.shot = {
     meta: result.result,
@@ -301,13 +423,21 @@ function logInput(text) {
   box.scrollTop = box.scrollHeight;
 }
 async function sendKey(kind) {
-  const key = $("input-key").value.trim();
-  if (!key) { toast("name a key first", true); return; }
+  const normalized = normalizeKeyName($("input-key").value);
+  if (!normalized.ok) { toast(normalized.reason, true); return; }
   const gateCheck = gate.check({ mutating: true });
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); return; }
-  const result = await rpc.call("Input.key",
-    keyParams(state.windowId, key, kind));
-  logInput("key " + key + " " + kind + ": " + (result.ok ? "ok" : result.error.message));
+  const result = await rpc.call("Input.key", {
+    windowId: state.windowId,
+    key: normalized.key,
+    kind,
+    ctrl: normalized.ctrl,
+    shift: normalized.shift,
+    alt: normalized.alt,
+  });
+  logInput("key " + normalized.key + (normalized.ctrl ? "+ctrl" : "") +
+           (normalized.shift ? "+shift" : "") + (normalized.alt ? "+alt" : "") +
+           " " + kind + ": " + (result.ok ? "ok" : result.error.message));
 }
 async function sendText() {
   const text = $("input-text").value;
@@ -387,13 +517,24 @@ async function invokeMethod(method, paramsText) {
   const gateCheck = gate.check(method);
   if (!gateCheck.permitted) { toast(gateCheck.reason, true); return; }
   const result = await rpc.call(method.name, params, 30);
+  if (result.stale) return;
   $("method-result").textContent = result.ok
     ? JSON.stringify(result.result, null, 2)
     : "error " + result.error.code + ": " + result.error.message;
   const operationId = result.ok && result.result && result.result.operationId;
   if (operationId) trackOperation(String(operationId));
 }
+function stopTracking(reason) {
+  if (state.tracking) {
+    state.tracking.stopped = true;
+    if (state.tracking.statusNode && reason) {
+      state.tracking.statusNode.textContent = "operation tracking stopped: " + reason;
+    }
+    state.tracking = null;
+  }
+}
 async function trackOperation(operationId) {
+  stopTracking("new operation started");
   const waitHost = $("method-wait");
   waitHost.replaceChildren();
   const status = el("span", "operation " + operationId + ": …");
@@ -406,10 +547,23 @@ async function trackOperation(operationId) {
       ? JSON.stringify(result.result) : result.error.message);
   });
   waitHost.append(status, cancel);
+  const tracking = { operationId, epoch: rpc.epoch, statusNode: status, stopped: false };
+  state.tracking = tracking;
   for (let i = 0; i < 600; ++i) {
     await new Promise((resolve) => setTimeout(resolve, 250));
+    if (tracking.stopped) return;
+    if (rpc.epoch !== tracking.epoch) {
+      // The connection changed: old-session results must not overwrite the
+      // new view, and the loop must not outlive its epoch.
+      status.textContent = "operation tracking stopped: connection changed";
+      return;
+    }
     const result = await rpc.call("Operation.get", { operationId });
-    if (!result.ok) { status.textContent = "operation query failed: " + result.error.message; return; }
+    if (result.stale || tracking.stopped) return;
+    if (!result.ok) {
+      status.textContent = "operation query failed: " + result.error.message;
+      return;
+    }
     const info = result.result;
     status.textContent = "operation " + operationId + ": " + info.state +
       (info.cancellationRequested ? " (cancel requested)" : "") +
@@ -419,7 +573,7 @@ async function trackOperation(operationId) {
   status.textContent = "operation tracking stopped (still running)";
 }
 
-// ---- events / logs / diagnostics ----------------------------------------
+// ---- events / logs / trace / diagnostics --------------------------------
 function stopPolling() {
   if (state.polling) { clearTimeout(state.polling.timer); state.polling = null; }
   $("events-toggle").textContent = "Start polling";
@@ -428,6 +582,7 @@ async function pollOnce() {
   const result = await rpc.call("Event.poll",
     { since: events.since, max: 100 }, 15);
   if (!state.polling) return;
+  if (result.stale) { stopPolling(); return; }
   if (!result.ok) {
     $("events-status").textContent = "poll failed: " + result.error.message;
   } else {
@@ -452,30 +607,48 @@ function appendEvent(event) {
   box.scrollTop = box.scrollHeight;
 }
 async function refreshLogs() {
-  const result = await rpc.call("Log.read", { after: 0, appAfter: 0, max: 200 });
+  if (!state.connected) { toast("connect first", true); return; }
+  const result = await rpc.call("Log.read", logs.nextParams(200), 15,
+                                { retryOnNetworkError: true });
   if (!result.ok) { toast("log read failed: " + result.error.message, true); return; }
-  state.logs = [];
+  const applied = logs.apply(result.result);
   const box = $("logs-list");
-  box.replaceChildren();
-  const sources = (result.result && result.result.sources) || {};
-  for (const records of Object.values(sources)) {
-    for (const record of records.records || []) state.logs.push(record);
+  for (const entry of applied.records) {
+    box.append(el("div", entry.source + " " + entry.record.sequence +
+      " [" + entry.record.level + "] " + entry.record.message));
   }
-  state.logs.sort((a, b) => a.sequence - b.sequence);
-  for (const record of state.logs) {
-    box.append(el("div", record.sequence + " [" + record.level + "] " + record.message));
-  }
+  while (box.childNodes.length > 800) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+  state.logs = Array.from(box.childNodes).map((node) => node.textContent);
+}
+function reapplyLogLevel() {
+  logs.setMinLevel($("log-level").value);
+  // The per-source cursors already consumed old records; restarting from
+  // zero re-reads history so the new filter applies to everything.
+  logs.reset();
+  $("logs-list").replaceChildren();
+  refreshLogs();
+}
+async function traceControl(action) {
+  if (!state.connected) { toast("connect first", true); return; }
+  const result = await rpc.call("Trace." + action, {});
+  $("trace-status").textContent = result.ok
+    ? JSON.stringify(result.result)
+    : "Trace." + action + " failed: " + result.error.message;
 }
 function downloadDiagnostics() {
   const text = diagnosticsSnapshot({
     info: state.info,
     windows: state.windows,
+    selectedWindow: state.windowId,
     snapshotMeta: state.snapshot && {
       revision: state.snapshot.revision, layoutRevision: state.snapshot.layoutRevision,
       documentGeneration: state.snapshot.documentGeneration,
     },
     eventsCursor: { since: events.since, gaps: events.gapCount },
-    logs: state.logs,
+    logCursors: logs.positions,
+    logLevel: logs.minLevel,
+    recentLogs: state.logs,
   }, secrets());
   const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
   const link = document.createElement("a");
@@ -499,6 +672,8 @@ for (const button of document.querySelectorAll("#tabs button")) {
 $("connect").addEventListener("click", connect);
 $("disconnect").addEventListener("click", disconnect);
 $("endpoint").value = location.origin;
+$("window-select").addEventListener("change", (event) => switchWindow(event.target.value));
+$("tab-select").addEventListener("change", (event) => switchTab(event.target.value));
 $("refresh-tree").addEventListener("click", refreshTree);
 $("tree-filter").addEventListener("input", () => state.snapshot && renderTree());
 $("capture-shot").addEventListener("click", capture);
@@ -513,6 +688,14 @@ $("input-key-up").addEventListener("click", () => sendKey("up"));
 $("input-type").addEventListener("click", sendText);
 $("input-wheel-send").addEventListener("click", sendWheel);
 $("method-filter").addEventListener("input", renderMethodList);
+$("schema-refresh").addEventListener("click", async () => {
+  if (!state.connected) { toast("connect first", true); return; }
+  const schema = await rpc.fetchSchema();
+  if (!schema.ok) { toast("schema refresh failed: " + schema.error, true); return; }
+  state.schema = schema.result;
+  renderMethodList();
+  toast("method catalogue refreshed");
+});
 $("events-toggle").addEventListener("click", () => {
   if (state.polling) { stopPolling(); return; }
   if (!state.connected) { toast("connect first", true); return; }
@@ -522,5 +705,13 @@ $("events-toggle").addEventListener("click", () => {
 });
 $("events-clear").addEventListener("click", () => $("events-list").replaceChildren());
 $("logs-refresh").addEventListener("click", refreshLogs);
+$("log-level").addEventListener("change", reapplyLogLevel);
+$("trace-start").addEventListener("click", () => traceControl("start"));
+$("trace-status-button").addEventListener("click", () => traceControl("status"));
+$("trace-stop").addEventListener("click", () => traceControl("stop"));
 $("diag-download").addEventListener("click", downloadDiagnostics);
-window.addEventListener("beforeunload", stopPolling);
+window.addEventListener("beforeunload", () => {
+  stopPolling();
+  stopTracking("page closed");
+  rpc.endSession();
+});

@@ -54,15 +54,21 @@ bool safe_segment(const std::string& name) {
 bool read_file_bytes(const std::filesystem::path& path, std::string& bytes) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec) || ec) return false;
-    if (auto size = std::filesystem::file_size(path, ec);
-        ec || size > DevtoolsPanel::kMaxFileBytes) {
-        return false;
-    }
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
-    bytes.assign((std::istreambuf_iterator<char>(file)),
-                 std::istreambuf_iterator<char>());
-    return file.good() || file.eof();
+    // Hard budget enforced DURING the read: a file that grows between the
+    // size check and the read can never make this loop unbounded.
+    std::vector<char> buffer(8192);
+    while (file) {
+        file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::size_t got = static_cast<std::size_t>(file.gcount());
+        if (got == 0) break;
+        if (bytes.size() + got > DevtoolsPanel::kMaxFileBytes) {
+            return false; // over budget, whatever the metadata claimed
+        }
+        bytes.append(buffer.data(), got);
+    }
+    return file.eof() || file.good();
 }
 
 } // namespace
@@ -76,14 +82,29 @@ bool DevtoolsPanel::mount(AutomationTransport& transport, const Options& options
     const std::string entry = options.mount_path;
     const std::string assets_prefix = entry + "/assets/";
 
+    // Panel sources reference assets through a {{MOUNT}} placeholder: the
+    // shell substitutes the actual mount path when serving. The page URL
+    // has no trailing slash, so plain relative URLs would resolve against
+    // the parent directory and miss the assets route entirely; the
+    // placeholder keeps every mount path working without hardcoding one.
+    const auto substitute = [entry](std::string body) {
+        const std::string placeholder = "{{MOUNT}}";
+        std::size_t at = body.find(placeholder);
+        while (at != std::string::npos) {
+            body.replace(at, placeholder.size(), entry);
+            at = body.find(placeholder, at + entry.size());
+        }
+        return body;
+    };
+
     // Keep the entry document alive for the handler's lifetime; asset files
     // are read per request so a dev refresh of the CSS/JS lands without a
     // process restart.
-    auto entry_document = std::make_shared<std::string>(std::move(panel_file));
+    auto entry_document = std::make_shared<std::string>(substitute(std::move(panel_file)));
     auto assets_root = std::make_shared<std::filesystem::path>(std::move(root));
 
     transport.set_public_file_handler(
-        [entry, assets_prefix, entry_document, assets_root](
+        [entry, assets_prefix, entry_document, assets_root, substitute](
             const std::string& path, AutomationTransport::RouteReply& reply) -> bool {
             if (path != entry && path.rfind(assets_prefix, 0) != 0) {
                 return false; // not ours: normal auth processing continues
@@ -111,6 +132,13 @@ bool DevtoolsPanel::mount(AutomationTransport& transport, const Options& options
                 reply.body = R"({"error":"panel asset missing"})";
                 reply.cache_control = "no-store";
                 return true;
+            }
+            // The JS module imports its sibling core through the same
+            // placeholder; text assets get the mount substituted so the
+            // served page works under any mount path.
+            if (name == "panel.js" || name == "panel_core.js" ||
+                name == "panel.css") {
+                bytes = substitute(std::move(bytes));
             }
             reply.status = 200;
             reply.content_type = content_type;

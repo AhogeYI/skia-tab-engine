@@ -271,6 +271,21 @@ DEVTOOLS_FILES = ("panel.html", "panel.css", "panel.js", "panel_core.js",
                   "panel_test.mjs")
 
 
+def source_provenance() -> dict:
+    """Real, checkable origin of the packaged bits: the exact commit and
+    whether the working tree carried uncommitted changes at packaging
+    time. Fail loudly when git cannot answer - guessing would defeat the
+    point."""
+    commit = capture("git", "-C", str(ROOT), "rev-parse", "HEAD").strip()
+    status = capture("git", "-C", str(ROOT), "status", "--porcelain").strip()
+    return {
+        "source_commit": commit,
+        "source_dirty": bool(status),
+        "source_branch": capture("git", "-C", str(ROOT), "rev-parse",
+                                 "--abbrev-ref", "HEAD").strip(),
+    }
+
+
 def install_tools(stage: Path) -> dict:
     """Ships the devtools panel and the MCP adapter with the SDK.
 
@@ -361,6 +376,7 @@ def package_sdk(config: str, skia_root: Path | None = None,
         "skia_gn_args_sha256": hashlib.sha256((stage / "skia_args.gn").read_bytes()).hexdigest(),
         "configuration": config,
         "platform": "windows-x64",
+        "provenance": source_provenance(),
         "tools": tools_section,
         "files": {p.relative_to(stage).as_posix(): hash_file(p) for p in files},
     }
@@ -454,6 +470,11 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
         raise SystemExit("SDK manifest does not declare the MCP adapter")
     if not any(p.startswith("tools/mcp/node_modules/") for p in manifest["files"]):
         raise SystemExit("SDK manifest does not include vendored MCP dependencies")
+    provenance = manifest.get("provenance") or {}
+    if not provenance.get("source_commit"):
+        raise SystemExit("SDK manifest does not declare its source commit")
+    if provenance.get("source_dirty"):
+        print("NOTE: the packaged working tree had uncommitted changes")
     consumer_src = build.parent / "consumer-src"
     shutil.copytree(ROOT / "tests" / "sdk_consumer", consumer_src)
     run("cmake", "-S", str(consumer_src), "-B", str(build),

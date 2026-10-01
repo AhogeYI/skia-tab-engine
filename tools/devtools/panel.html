@@ -6,7 +6,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TabEngine DevTools</title>
-<link rel="stylesheet" href="/automation/v1/panel/assets/panel.css">
+<link rel="stylesheet" href="{{MOUNT}}/assets/panel.css">
 </head>
 <body>
 <header id="connect-bar">
@@ -29,6 +29,8 @@
   <section id="tab-inspect" class="tab active">
     <div class="pane">
       <div class="toolbar">
+        <label>window <select id="window-select" disabled><option>no window</option></select></label>
+        <label>tab <select id="tab-select" disabled><option>-</option></select></label>
         <button id="refresh-tree">Refresh</button>
         <input id="tree-filter" placeholder="filter by key, role, name">
         <label>snapshot <span id="snapshot-meta" class="muted"></span></label>
@@ -52,10 +54,10 @@
         <div id="shot-stage"><canvas id="shot-overlay"></canvas><img id="shot" alt="screenshot"></div>
       </div>
       <div id="input-panel" class="mono">
-        <p class="muted">Click on the image to send the mapped click. Input and capture use client pixels; browser image scaling is mapped automatically.</p>
+        <p class="muted">Click on the image to send the mapped click. Input and capture use client pixels; browser image scaling is mapped automatically. Key names follow the protocol: lowercase logical names with optional ctrl/shift/alt chords ("enter", "f4", "ctrl+shift+s").</p>
         <div class="row"><button id="input-refresh">Refresh capture</button></div>
         <div class="row">
-          <label>key <input id="input-key" size="10" placeholder="e.g. ControlLeft"></label>
+          <label>key <input id="input-key" size="14" placeholder="e.g. enter or ctrl+alt+p"></label>
           <button id="input-key-down">down</button> <button id="input-key-up">up</button>
         </div>
         <div class="row">
@@ -75,6 +77,7 @@
       <div class="pane">
         <div class="toolbar">
           <input id="method-filter" placeholder="filter methods">
+          <button id="schema-refresh">Refresh catalogue</button>
           <span id="method-count" class="muted"></span>
         </div>
         <div id="method-list" class="scroll mono"></div>
@@ -92,15 +95,27 @@
       <span id="events-status" class="muted"></span>
       <button id="events-clear">Clear</button>
       <button id="logs-refresh">Fetch logs</button>
+      <label>level <select id="log-level">
+        <option value="debug">debug+</option>
+        <option value="info">info+</option>
+        <option value="warning">warning+</option>
+        <option value="error">error</option>
+      </select></label>
+      <button id="trace-start">Trace start</button>
+      <button id="trace-status-button">Trace status</button>
+      <button id="trace-stop">Trace stop</button>
       <button id="diag-download">Download diagnostics</button>
     </div>
-    <div class="split">
-      <div id="events-list" class="scroll mono"></div>
-      <div id="logs-list" class="scroll mono"></div>
+    <div class="split" style="flex-direction: column;">
+      <div class="split" style="flex: 1; min-height: 0;">
+        <div id="events-list" class="scroll mono"></div>
+        <div id="logs-list" class="scroll mono"></div>
+      </div>
+      <div id="trace-status" class="mono muted" style="max-height: 90px; overflow: auto;">trace idle</div>
     </div>
   </section>
 </main>
 <div id="toast" hidden></div>
-<script type="module" src="/automation/v1/panel/assets/panel.js"></script>
+<script type="module" src="{{MOUNT}}/assets/panel.js"></script>
 </body>
 </html>

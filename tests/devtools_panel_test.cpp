@@ -238,6 +238,46 @@ int main() {
         CHECK(!unmounted.mount(other, {resources / "missing", "/automation/v1/panel"}));
     }
 
+    // A custom mount_path serves the same shell and assets relative to the
+    // mount (the HTML references its assets relatively, so the page works
+    // under any mount without hardcoded route knowledge).
+    {
+        AutomationTransport custom{runtime, [&] {
+                                       TransportConfig config;
+                                       config.token = token;
+                                       config.response_timeout_s = 2.0;
+                                       return config;
+                                   }()};
+        DevtoolsPanel custom_panel;
+        CHECK(custom_panel.mount(custom, {resources, "/panel/custom"}));
+        CHECK(custom.start());
+        const RawResponse page = round_trip([&] {
+            return http_raw(custom.port(),
+                            get_request("/panel/custom", false, token));
+        });
+        CHECK(page.status == 200 && page.body.find("shell") != std::string::npos);
+        const RawResponse script = round_trip([&] {
+            return http_raw(custom.port(),
+                            get_request("/panel/custom/assets/panel.js", false, token));
+        });
+        CHECK(script.status == 200 &&
+              script.head.find("Content-Type: text/javascript") != std::string::npos);
+        // The shell rewrites asset references to the actual mount path (the
+        // page URL has no trailing slash, so plain relative URLs would
+        // resolve outside the assets route).
+        CHECK(page.body.find("/panel/custom/assets/panel.js") != std::string::npos);
+        CHECK(script.body.find("/panel/custom/assets/panel_core.js") != std::string::npos);
+        const RawResponse wrong_assets = round_trip([&] {
+            return http_raw(custom.port(),
+                            get_request("/automation/v1/panel/assets/panel.js", false, token));
+        });
+        // A path outside the custom mount falls through to normal auth
+        // processing: without a token that is a 401, never panel bytes.
+        CHECK(wrong_assets.status == 401);
+        CHECK(wrong_assets.body.find("panel = true") == std::string::npos);
+        custom.stop();
+    }
+
     transport.stop();
     std::error_code ec;
     std::filesystem::remove_all(resources, ec);

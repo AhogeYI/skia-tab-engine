@@ -230,8 +230,13 @@ so hosts can tighten or widen a live session.
   over another window's strip, canceling, and floating all behave like the
   product. `Tab.transfer` is the command path and a different test
   surface; it is not a substitute for input verification.
-- Keys use logical names (`Enter`, `Escape`, `a`, `F4`, ...) with
-  `ctrl`/`shift`/`alt` modifiers; unknown names report `InvalidArgument`.
+- Keys use lowercase logical names (`enter`, `escape`, `return`, `esc`,
+  `a`, `f4`, `arrowleft`, `pageup`, `del`, single alphanumerics, ...) with
+  `ctrl`/`shift`/`alt` boolean modifiers. Names are matched
+  case-sensitively against the bridge table; unknown names (including
+  standalone modifier keys like `ControlLeft` - modifiers are flags on a
+  key event, not keys) report `InvalidArgument` instead of dropping
+  modifiers.
   `typeText` delivers text as `TextInput` events that never pass the
   shortcut hook.
 - Pointer sessions are owned per connection: two clients cannot interleave
