@@ -144,8 +144,15 @@ public:
         if (event.type == tabengine::EventType::PointerDown &&
             event.button == tabengine::PointerButton::Left) {
             if (layout.button.contains(event.client)) {
-                state_.task_running = true;
-                state_.task_ends_at = state_.clock() + 0.6;
+                // The button click and the automation method start the
+                // same tracked task (set from main once the runtime
+                // exists); the fallback keeps the client usable alone.
+                if (start_task_) {
+                    start_task_(0.6);
+                } else {
+                    state_.task_running = true;
+                    state_.task_ends_at = state_.clock() + 0.6;
+                }
             } else if (layout.edit.contains(event.client)) {
                 focused_ = true;
             } else {
@@ -183,11 +190,18 @@ public:
 
     [[nodiscard]] tabengine::Rect body_bounds() const { return body_bounds_; }
 
+    // Set from main once the automation runtime exists: button clicks and
+    // the app.example.runTask method start the same operation-tracked task.
+    void set_task_starter(std::function<void(double)> starter) {
+        start_task_ = std::move(starter);
+    }
+
 private:
     ExampleState& state_;
     tabengine::ContentId next_content_ = 1;
     bool focused_ = false;
     tabengine::Rect body_bounds_{0, 41, 720, 400};
+    std::function<void(double)> start_task_;
 };
 
 // Semantic provider: the same layout rectangles used for painting and hit
@@ -403,19 +417,75 @@ int run_self_check(std::uint16_t port, const std::string& token, int& steps) {
         std::fprintf(stderr, "self-check: task did not start: %.200s\n", state.body.c_str());
         return 4;
     }
+    const std::string first_operation = json_string_field(state.body, "operationId");
+    if (first_operation.empty()) {
+        std::fprintf(stderr, "self-check: task has no operation id: %.200s\n",
+                     state.body.c_str());
+        return 5;
+    }
     const HttpResult quiet = call(
         "Wait.condition",
         R"({"condition":"activityQuiet","scope":"exampleTasks","timeoutS":10})");
     if (quiet.body.find("\"satisfied\":true") == std::string::npos) {
         std::fprintf(stderr, "self-check: condition wait failed: %.200s\n",
                      quiet.body.c_str());
-        return 5;
+        return 6;
+    }
+    // The async Operation reached its terminal state through the owner's
+    // finish call, not through the wait timing out.
+    const HttpResult done = call("Operation.get",
+                                 R"({"operationId":")" + first_operation + "\"}");
+    if (done.body.find("\"state\":\"completed\"") == std::string::npos) {
+        std::fprintf(stderr, "self-check: operation terminal state wrong: %.200s\n",
+                     done.body.c_str());
+        return 7;
+    }
+    // Custom test action domain round-trip.
+    const HttpResult assertion =
+        call("test.example.assertState", R"({"completedTasks":1})");
+    if (assertion.body.find("\"matches\":true") == std::string::npos) {
+        std::fprintf(stderr, "self-check: test action failed: %.200s\n",
+                     assertion.body.c_str());
+        return 8;
+    }
+    // Cooperative cancel: request the stop, then observe the cancelled
+    // terminal state once the work actually stops.
+    const HttpResult long_task =
+        call("app.example.runTask", R"({"durationS":30})");
+    const std::string second_operation = json_string_field(long_task.body, "operationId");
+    if (second_operation.empty() || second_operation == first_operation) {
+        std::fprintf(stderr, "self-check: long task did not start: %.200s\n",
+                     long_task.body.c_str());
+        return 9;
+    }
+    const HttpResult cancel = call("Operation.cancel",
+                                   R"({"operationId":")" + second_operation + "\"}");
+    if (cancel.body.find("\"cancellationRequested\":true") == std::string::npos) {
+        std::fprintf(stderr, "self-check: cancel not acknowledged: %.200s\n",
+                     cancel.body.c_str());
+        return 10;
+    }
+    const HttpResult cancelled = call(
+        "Wait.condition",
+        R"({"condition":"operationDone","operationId":")" + second_operation +
+            R"(","timeoutS":10})");
+    if (cancelled.body.find("\"satisfied\":true") == std::string::npos) {
+        std::fprintf(stderr, "self-check: cancelled wait failed: %.200s\n",
+                     cancelled.body.c_str());
+        return 11;
+    }
+    const HttpResult cancelled_state = call(
+        "Operation.get", R"({"operationId":")" + second_operation + "\"}");
+    if (cancelled_state.body.find("\"state\":\"cancelled\"") == std::string::npos) {
+        std::fprintf(stderr, "self-check: cancelled state wrong: %.200s\n",
+                     cancelled_state.body.c_str());
+        return 12;
     }
     const HttpResult shot = call("Capture.screenshot", R"({"windowId":"1","frame":"fresh"})");
     const std::string artifact = json_string_field(shot.body, "artifactId");
     if (artifact.empty() || shot.body.find("\"mediaType\":\"image/png\"") == std::string::npos) {
         std::fprintf(stderr, "self-check: capture failed: %.200s\n", shot.body.c_str());
-        return 6;
+        return 13;
     }
     const HttpResult png =
         http_get(port, token, "/automation/v1/artifacts/" + artifact);
@@ -423,7 +493,7 @@ int run_self_check(std::uint16_t port, const std::string& token, int& steps) {
         png.body.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) != 0) {
         std::fprintf(stderr, "self-check: artifact fetch failed (%d, %zu bytes)\n",
                      png.status, png.body.size());
-        return 7;
+        return 14;
     }
     steps += 1;   // the artifact fetch is HTTP but not JSON-RPC
     std::printf("{\"selfCheck\":\"passed\",\"rpcCalls\":%d,\"httpCalls\":%d,"
@@ -484,39 +554,117 @@ int main(int argc, char** argv) {
     (void)diagnostics_registration;
 
     // Application domain: business actions and state, registered through
-    // the public extension path (no engine changes needed).
+    // the public extension path (no engine changes needed). runTask is the
+    // reference for an asynchronous Operation: the method returns after
+    // starting, the runtime operation stays Running until this app reports
+    // the task's own terminal state, and Operation.cancel flows through a
+    // cooperative bridge instead of pretending the work stopped.
+    struct TaskOperation {
+        std::uint64_t id = 0;
+        bool cancel_requested = false;
+    } task_operation;
+    const auto finish_settled_task = [&] {
+        // The owner ticks its own work here: the clock may have passed the
+        // task's end without any other observer driving state.update().
+        state.update();
+        if (task_operation.id == 0 || state.task_running) return;
+        automation::JsonValue result = automation::JsonValue::object();
+        result.set("completedTasks",
+                   static_cast<std::int64_t>(state.completed_tasks));
+        if (task_operation.cancel_requested) {
+            runtime.finish_operation(task_operation.id,
+                                     automation::OperationState::Cancelled,
+                                     std::move(result), {});
+        } else {
+            runtime.finish_operation(task_operation.id,
+                                     automation::OperationState::Completed,
+                                     std::move(result), {});
+        }
+        task_operation.id = 0;
+    };
+    // One task at a time; both the button click and the automation method
+    // come through here so the runtime operation covers every entry point.
+    const auto start_tracked_task = [&](double duration) {
+        state.update();
+        if (state.task_running) return false;
+        if (duration < 0.05) duration = 0.05;
+        if (duration > 30.0) duration = 30.0;
+        state.task_running = true;
+        state.task_ends_at = state.clock() + duration;
+        task_operation.cancel_requested = false;
+        task_operation.id = runtime.start_operation(
+            "app.example.runTask", [&task_operation, &state, &platform] {
+                // Cooperative: acknowledge the request and stop the work;
+                // the terminal state follows when it actually stops.
+                task_operation.cancel_requested = true;
+                state.task_ends_at = platform->monotonic_seconds() + 0.05;
+                return true;
+            });
+        diagnostics.add("task started via automation");
+        return true;
+    };
+    client.set_task_starter([&](double duration) {
+        (void)start_tracked_task(duration);
+    });
     automation::MethodRegistration app_registration;
     {
+        automation::JsonValue run_params = automation::JsonValue::object();
+        run_params.set("type", "object");
+        automation::JsonValue run_properties = automation::JsonValue::object();
+        automation::JsonValue duration = automation::JsonValue::object();
+        duration.set("type", "number");
+        duration.set("description", "Task duration in seconds (0.05..30).");
+        duration.set("default", 0.6);
+        run_properties.set("durationS", std::move(duration));
+        run_params.set("properties", std::move(run_properties));
+
         std::vector<automation::MethodDescriptor> methods;
         automation::MethodDescriptor run;
         run.name = "app.example.runTask";
-        run.summary = "Start the demo's finite background task.";
+        run.summary = "Start the demo's finite background task as an async Operation.";
         run.mutating = true;
-        run.params = automation::JsonValue::object();
+        run.params = run_params;
         run.result = automation::JsonValue::object();
         methods.push_back(std::move(run));
         automation::MethodDescriptor get_state;
         get_state.name = "app.example.getState";
-        get_state.summary = "Text, task flag and completion counter.";
+        get_state.summary = "Text, task flag, completion counter, live operation.";
         get_state.params = automation::JsonValue::object();
         get_state.result = automation::JsonValue::object();
         methods.push_back(std::move(get_state));
         auto registration = runtime.register_methods(
             "app.example", std::move(methods),
-            [&state, &diagnostics](const automation::RequestContext& context,
-                                   automation::CompletionSink sink) {
+            [&state, &task_operation, &start_tracked_task](
+                const automation::RequestContext& context,
+                automation::CompletionSink sink) {
                 state.update();
                 automation::JsonValue result = automation::JsonValue::object();
                 if (context.method == "app.example.runTask") {
-                    state.task_running = true;
-                    state.task_ends_at = state.clock() + 0.6;
-                    diagnostics.add("task started via automation");
+                    double duration = 0.6;
+                    if (const auto* requested = context.params.find("durationS")) {
+                        duration = requested->as_number();
+                    }
+                    if (!start_tracked_task(duration)) {
+                        sink(automation::MethodOutcome::failure(
+                            automation::Error::make(
+                                automation::ErrorCode::InvalidOperationState,
+                                "a task is already running")));
+                        return;
+                    }
                     result.set("started", true);
+                    result.set("operationId",
+                               automation::id_to_wire(task_operation.id));
                 } else {
                     result.set("taskRunning", state.task_running);
                     result.set("completedTasks",
                                static_cast<std::int64_t>(state.completed_tasks));
                     result.set("text", state.text);
+                    if (state.task_running && task_operation.id != 0) {
+                        result.set("operationId",
+                                   automation::id_to_wire(task_operation.id));
+                        result.set("cancellationRequested",
+                                   task_operation.cancel_requested);
+                    }
                 }
                 sink(automation::MethodOutcome::success(std::move(result)));
             });
@@ -525,6 +673,63 @@ int main(int argc, char** argv) {
             return 2;
         }
         app_registration = std::move(registration);
+    }
+
+    // Custom test action domain: the test.<owner>.* prefix is reserved for
+    // exactly this - deterministic assertions over the app's observable
+    // state, never business actions. Read-only, no engine knowledge.
+    automation::MethodRegistration test_registration;
+    {
+        automation::JsonValue assert_params = automation::JsonValue::object();
+        assert_params.set("type", "object");
+        automation::JsonValue assert_properties = automation::JsonValue::object();
+        automation::JsonValue completed = automation::JsonValue::object();
+        completed.set("type", "integer");
+        completed.set("description", "Expected completedTasks count.");
+        completed.set("minimum", 0);
+        assert_properties.set("completedTasks", std::move(completed));
+        automation::JsonValue running = automation::JsonValue::object();
+        running.set("type", "boolean");
+        running.set("description", "Expected taskRunning flag.");
+        assert_properties.set("taskRunning", std::move(running));
+        assert_params.set("properties", std::move(assert_properties));
+
+        std::vector<automation::MethodDescriptor> methods;
+        automation::MethodDescriptor assert_state;
+        assert_state.name = "test.example.assertState";
+        assert_state.summary = "Assert the demo's observable task state.";
+        assert_state.mutating = false;
+        assert_state.params = assert_params;
+        assert_state.result = automation::JsonValue::object();
+        methods.push_back(std::move(assert_state));
+        auto registration = runtime.register_methods(
+            "test.example", std::move(methods),
+            [&state](const automation::RequestContext& context,
+                     automation::CompletionSink sink) {
+                state.update();
+                bool matches = true;
+                if (const auto* completed = context.params.find("completedTasks")) {
+                    matches = matches && static_cast<std::int64_t>(
+                                              state.completed_tasks) ==
+                                              completed->as_integer();
+                }
+                if (const auto* running = context.params.find("taskRunning")) {
+                    matches = matches && state.task_running == running->as_boolean();
+                }
+                automation::JsonValue result = automation::JsonValue::object();
+                result.set("matches", matches);
+                if (!matches) {
+                    result.set("actualCompletedTasks",
+                               static_cast<std::int64_t>(state.completed_tasks));
+                    result.set("actualTaskRunning", state.task_running);
+                }
+                sink(automation::MethodOutcome::success(std::move(result)));
+            });
+        if (!registration.valid()) {
+            std::fprintf(stderr, "failed to register test.example\n");
+            return 2;
+        }
+        test_registration = std::move(registration);
     }
 
     // Compose wakes: the pump owns the platform wake handler; this app's
@@ -536,6 +741,9 @@ int main(int argc, char** argv) {
         [&platform](double delay) { platform->request_delayed_wake(delay); });
     auto drain_subscription = pump.subscribe([&] {
         runtime.drain(platform->monotonic_seconds());
+        // The task owner reports its own terminal state: once the demo's
+        // task stopped running, the runtime operation settles with it.
+        finish_settled_task();
     });
 
     const tabengine::WindowId window =
