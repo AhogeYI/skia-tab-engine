@@ -1,5 +1,31 @@
 # Release notes
 
+## 0.3.0
+
+Protocol version stays `1.0`. The SDK version moves because the platform
+contract grew: embedders can now delegate the Windows UI Automation root
+object. Consumers recompile against the new package - there is no binary
+ABI promise within a version line.
+
+This release also restores a unique version-to-contract identity: 0.2.0
+was never published, and two locally packaged 0.2.0 archives with
+different headers circulated during development. Any 0.2.0 archive found
+in the wild must be treated as an untracked development build; the
+supported public contracts are 0.1.0 and 0.3.0.
+
+### UI Automation root delegation
+
+- `tabengine::IPlatform::set_uia_root_provider(WindowId, void*)` is a new
+  optional virtual (default-absent). The Win32 backend forwards
+  `WM_GETOBJECT` for `UiaRootObjectId` through
+  `UiaReturnRawElementProvider` to the embedder's
+  `IRawElementProviderSimple`, and clears the delegation when the window
+  or platform is destroyed. Embedders answer `WM_GETOBJECT` only through
+  this hook - no subclassing of engine-owned windows.
+- `Shell::body_bounds(WindowId)` is now public: side-frame hosts need the
+  body rectangle to map client-relative control geometry to screen
+  coordinates for UI Automation providers.
+
 ## 0.2.0
 
 Protocol version stays `1.0`; the SDK version moves because the public
