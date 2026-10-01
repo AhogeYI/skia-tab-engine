@@ -20,6 +20,38 @@ struct NewTab {
     std::string title = "New Tab";
 };
 
+// Independent observation of shell activity, for automation bridges and
+// developer tooling. Observers are raw, non-owning pointers; they never
+// change product callback order and must be removed before the shell (and
+// themselves) go away. Add and remove observers on the UI thread only.
+class ShellObserver {
+public:
+    virtual ~ShellObserver() = default;
+    virtual void window_opened(WindowId) {}
+    virtual void window_closed(WindowId) {}
+    virtual void tab_added(WindowId, TabId, ContentId) {}
+    // Fired exactly where IClient::tab_closed fires: once per tab, when it
+    // is finally closed (individually or with its window).
+    virtual void tab_closed(WindowId, TabId, ContentId) {}
+    virtual void tab_selected(WindowId, TabId) {}
+    virtual void tab_moved(WindowId, TabId, std::size_t) {}
+    virtual void tab_transferred(WindowId from, WindowId to, TabId, std::size_t) {}
+    virtual void tab_updated(WindowId, TabId) {}
+    virtual void activation_changed(WindowId, bool) {}
+    // Raw copy of every event at the dispatch entry, before handling.
+    virtual void shell_event(const Event&) {}
+    // Fired after a frame has been fully drawn and presented; the serial is
+    // per-window and monotonic across the window's lifetime.
+    virtual void frame_presented(WindowId, std::uint64_t serial) {}
+    // Fired when the last finite animation for the window settles.
+    virtual void animations_settled(WindowId) {}
+    // Tab drag lifecycle: armed once the pointer passes the drag slop (in
+    // strip) or a tear-off window is created; finished on settle, cancel,
+    // or move-loop completion.
+    virtual void drag_started(WindowId, TabId) {}
+    virtual void drag_finished(WindowId, TabId) {}
+};
+
 // The embedding application owns content, navigation, menus, persistence, and
 // the entire body below the tab strip. It can draw into the same SkCanvas.
 class IClient {
@@ -99,6 +131,15 @@ public:
     [[nodiscard]] const Model& model() const { return model_; }
     // Read-only hit targets for accessibility and runtime automation.
     [[nodiscard]] std::vector<ChromeTarget> chrome_targets(WindowId window) const;
+    // Observation (see ShellObserver). UI thread only.
+    void add_observer(ShellObserver* observer);
+    void remove_observer(ShellObserver* observer);
+    // Serial of the last presented frame for the window (0 = none yet).
+    [[nodiscard]] std::uint64_t frame_serial(WindowId window) const;
+    // True while finite tab/hover-card animations are still running.
+    [[nodiscard]] bool has_active_animations(WindowId window) const;
+    // Client-area bounds of the body (below the tab strip) for this window.
+    [[nodiscard]] Rect body_bounds(WindowId window) const;
     // Declares that the client is running a pointer drag that started in the
     // body (the client captured the pointer). While active, pointer moves
     // over the tab strip are forwarded to IClient::body_event instead of
@@ -192,7 +233,6 @@ private:
     void request_destroy(WindowId window);
     void flush_destroy();
     void destroy_window_contents(WindowId window);
-    [[nodiscard]] Rect body_bounds(WindowId window) const;
     [[nodiscard]] StripLayout layout(WindowId window) const;
     [[nodiscard]] TabId tab_at(WindowId window, Point client) const;
     [[nodiscard]] bool over_strip(WindowId window, Point screen) const;
@@ -223,6 +263,15 @@ private:
     std::unordered_set<WindowId> busy_windows_;
     std::unordered_map<WindowId, WindowVisual> visuals_;
     int dispatch_depth_ = 0;
+    std::vector<ShellObserver*> observers_;
+    std::vector<WindowId> notify_deferred_closed_;
+    std::unordered_map<WindowId, std::uint64_t> frame_serials_;
+
+    template <typename Fn>
+    void notify(Fn&& callback) {
+        for (ShellObserver* observer : observers_) callback(*observer);
+    }
+    void notify_selected(WindowId window, TabId previous, TabId current);
 };
 
 } // namespace tabengine

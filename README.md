@@ -39,6 +39,15 @@ content, input routing, and styling.
   leading slot, optional tab icons, and up to four extra caption buttons the
   application paints and handles while TabEngine keeps their layout and hit
   testing aligned with the strip.
+- **Automation** — an in-process control runtime with a method registry,
+  semantic snapshots merging engine chrome with application-provided
+  nodes, real input synthesis (clicks by node or coordinate, drags that
+  tear off through the shell's own state machine, keys, text, IME, wheel),
+  frame-accurate screenshots on both Raster and D3D12 with bounded
+  artifacts, typed wait conditions, operations, an event ring and bounded
+  traces, plus an optional loopback HTTP transport and a Python CLI.
+  External tools drive a running application the way a user does; the
+  engine core stays free of product concepts.
 - **Win32 platform** — custom frame with resize and caption hit testing,
   per-monitor DPI and activation notifications, interactive-placement
   callbacks, a cross-thread UI wake, and a native move loop with
@@ -178,6 +187,8 @@ against the headers in `include/tabengine/`.
 | --- | --- |
 | [docs/SDK_USER_GUIDE.md](docs/SDK_USER_GUIDE.md) | Building an application from an extracted SDK |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | Public API contract, header by header |
+| [docs/AUTOMATION_GUIDE.md](docs/AUTOMATION_GUIDE.md) | Enabling, securing and extending the automation runtime and transport |
+| [docs/AUTOMATION_API_REFERENCE.md](docs/AUTOMATION_API_REFERENCE.md) | Automation API reference, header by header |
 | [docs/SDK_DEVELOPMENT.md](docs/SDK_DEVELOPMENT.md) | Building and packaging the SDK, pinned Skia inputs |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development environment, build/test loop, contribution terms |
 
@@ -187,19 +198,27 @@ TabEngine is a development preview. The public API promises **source
 compatibility only** — there is no stable binary ABI, so rebuild consumers
 when updating the SDK.
 
-What is verified: ten CTest suites cover the model, shell lifecycle, drag
+What is verified: thirteen CTest suites cover the model, shell lifecycle, drag
 transfer and cancellation, IME and character input, text rendering, hidden
-window rendering, and D3D12 resize with backend retention; GPU and raster
-screenshot checks, a second window, and a scripted native tear-off have been
+window rendering, D3D12 resize with backend retention, the automation
+runtime (protocol values, registry, queueing, waits, events), the shell
+bridge over real protocol calls, and the loopback transport over real
+sockets; GPU and raster **capture** checks assert pixel content on both
+public renderers; a second window and a scripted native tear-off have been
 confirmed on Windows; and the platform-neutral core is built and tested on
 Linux, macOS, and Windows in Debug and Release by a CI gate
 (`.github/workflows/ci.yml`) that keeps
-OS-specific dependencies out of the contracts. What is not yet validated:
+OS-specific dependencies out of the contracts. The packaged SDK is validated
+by extracting it outside the source tree and building and running both
+bundled examples, including the automation demo's self-check, for Debug and
+Release. What is not yet validated:
 physical pointer feel,
 attachment over an existing window, multi-monitor DPI switches, and IME
 candidate behavior on real hardware need hands-on testing, and other desktop
-platforms are unimplemented. Keyboard focus/accessibility, touch, pinned tabs,
-and tab groups are future work.
+platforms are unimplemented. Native input injection, OLE drag-and-drop and
+system IME candidate windows are explicitly out of scope for the first
+automation version and report `Unsupported`; keyboard
+focus/accessibility, touch, pinned tabs, and tab groups are future work.
 
 ## Contributing
 

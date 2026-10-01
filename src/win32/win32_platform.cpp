@@ -7,6 +7,10 @@
 #include <dwmapi.h>
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
+#include <objbase.h>
+#include <UIAutomationCore.h>
+#include <UIAutomationCoreApi.h>
+#pragma comment(lib, "UIAutomationCore.lib")
 
 #include <algorithm>
 #include <memory>
@@ -21,6 +25,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"TabEngineWindow";
 constexpr wchar_t kWakeClassName[] = L"TabEngineWake";
 constexpr UINT_PTR kAnimationTimer = 1;
+constexpr UINT_PTR kDelayedWakeTimer = 2;
 
 // UTF-16 composition strings (ImmGetCompositionStringW) to UTF-8 events;
 // surrogate pairs fold to one scalar value.
@@ -117,10 +122,23 @@ public:
         ime_caret_ = std::move(provider);
     }
 
+    void set_uia_root_provider(WindowId id, void* provider) override {
+        const auto found = windows_.find(id);
+        if (found != windows_.end()) found->second->uia_root_provider = provider;
+    }
+
     void wake() override {
         // Post, never send: a synchronous SendMessage would run the handler on
         // the waking thread instead of the pumping thread.
         if (wake_hwnd_) PostMessageW(wake_hwnd_, WM_APP, 0, 0);
+    }
+
+    void request_delayed_wake(double delay_seconds) override {
+        if (!wake_hwnd_) return;
+        const UINT milliseconds = static_cast<UINT>(
+            std::max(1.0, std::min(delay_seconds * 1000.0, 60'000.0)));
+        // SetTimer replaces any pending timer: delayed wakes coalesce.
+        SetTimer(wake_hwnd_, kDelayedWakeTimer, milliseconds, nullptr);
     }
 
     bool create(WindowId id, Rect bounds, std::string_view title, bool visible) override {
@@ -150,6 +168,14 @@ public:
         }
     }
 
+    void hide(WindowId id) override {
+        if (HWND hwnd = handle(id)) {
+            // No activation, no animation: a resident instance leaves the
+            // screen while keeping its surface and state alive.
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
     void destroy(WindowId id) override {
         if (emitting_ > 0) {
             if (std::find(pending_destroy_.begin(), pending_destroy_.end(), id) ==
@@ -166,6 +192,7 @@ public:
         auto it = windows_.find(id);
         if (it == windows_.end()) return;
         HWND hwnd = it->second->hwnd;
+        it->second->uia_root_provider = nullptr;
         if (hwnd) DestroyWindow(hwnd);
         windows_.erase(it);
         if (windows_.empty()) PostQuitMessage(0);
@@ -254,6 +281,43 @@ public:
         }
     }
 
+    bool set_client_bounds(WindowId id, Rect screen_bounds) override {
+        HWND hwnd = handle(id);
+        if (!hwnd || screen_bounds.width <= 0 || screen_bounds.height <= 0) return false;
+        // This platform's custom frame returns 0 from WM_NCCALCSIZE, so the
+        // client rectangle IS the window rectangle; applying the standard
+        // frame margins (AdjustWindowRectExForDpi) shifted real windows by
+        // the frame size (8x31 px at 96 dpi) away from the request. Place
+        // the window rect directly on the requested client rect.
+        return SetWindowPos(hwnd, nullptr, screen_bounds.x, screen_bounds.y,
+                            screen_bounds.width, screen_bounds.height,
+                            SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+    }
+
+    void activate(WindowId id) override {
+        HWND hwnd = handle(id);
+        if (!hwnd) return;
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+    }
+
+    bool begin_move_session(WindowId id) override {
+        auto it = windows_.find(id);
+        if (it == windows_.end() || it->second->in_move_loop) return false;
+        it->second->stepwise_move = true;
+        return true;
+    }
+
+    void end_move_session(WindowId id, MoveLoopResult result) override {
+        auto it = windows_.find(id);
+        if (it == windows_.end() || !it->second->stepwise_move) return;
+        it->second->stepwise_move = false;
+        Event ended;
+        ended.type = EventType::MoveEnded;
+        ended.move_result = result;
+        emit(*it->second, ended);
+    }
+
     MoveLoopResult run_native_move_loop(WindowId id) override {
         auto it = windows_.find(id);
         if (it == windows_.end() || it->second->in_move_loop) return MoveLoopResult::Unsupported;
@@ -296,7 +360,15 @@ public:
 
     void end_native_move_loop(WindowId id) override {
         auto it = windows_.find(id);
-        if (it != windows_.end() && it->second->in_move_loop) {
+        if (it == windows_.end()) return;
+        // A stepwise session has no OS loop to cancel: end it directly and
+        // report the attach-probe outcome as a canceled move (the shell
+        // honors a pending target even when the result is Canceled).
+        if (it->second->stepwise_move) {
+            end_move_session(id, MoveLoopResult::Canceled);
+            return;
+        }
+        if (it->second->in_move_loop) {
             it->second->move_loop_canceled = true;
             SendMessageW(it->second->hwnd, WM_CANCELMODE, 0, 0);
         }
@@ -327,8 +399,12 @@ private:
         bool move_loop_mouse_up = false;
         bool move_loop_exited = false;
         bool skip_first_moving = false;
+        bool stepwise_move = false;
         bool tracking_mouse = false;
         bool frame_pending = false;
+        // Application-registered UIA root provider (opaque here); answered
+        // verbatim in WM_GETOBJECT. Cleared when the window is destroyed.
+        void* uia_root_provider = nullptr;
     };
 
     inline static thread_local Native* move_hook_native_ = nullptr;
@@ -383,6 +459,11 @@ private:
             if (self && self->wake_) self->wake_();
             return 0;
         }
+        if (message == WM_TIMER && wp == kDelayedWakeTimer) {
+            KillTimer(hwnd, kDelayedWakeTimer);
+            if (self && self->wake_) self->wake_();
+            return 0;
+        }
         return DefWindowProcW(hwnd, message, wp, lp);
     }
 
@@ -397,6 +478,18 @@ private:
         if (!native) return DefWindowProcW(hwnd, message, wp, lp);
         Win32Platform& self = *native->platform;
         switch (message) {
+        case WM_GETOBJECT:
+            // UIA root queries route to the application's provider; the
+            // engine never interprets it. Everything else stays default so
+            // MSAA requests keep their standard answer.
+            if (static_cast<DWORD>(lp) == UiaRootObjectId &&
+                native->uia_root_provider) {
+                return UiaReturnRawElementProvider(
+                    hwnd, wp, lp,
+                    static_cast<IRawElementProviderSimple*>(
+                        native->uia_root_provider));
+            }
+            break;
         case WM_NCCALCSIZE:
             if (wp) return 0;
             break;
@@ -501,6 +594,19 @@ private:
             pointer.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             pointer.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             pointer.button = button;
+            if (message == WM_LBUTTONDBLCLK || message == WM_RBUTTONDBLCLK ||
+                message == WM_MBUTTONDBLCLK) {
+                pointer.click_count = 2;
+            }
+            if (!is_press) {
+                // The complete held-button set for moves and releases; the
+                // released button is already excluded by the system.
+                unsigned held = 0;
+                if (wp & MK_LBUTTON) held |= kPointerButtonLeft;
+                if (wp & MK_RBUTTON) held |= kPointerButtonRight;
+                if (wp & MK_MBUTTON) held |= kPointerButtonMiddle;
+                pointer.buttons = held;
+            }
             self.emit(*native, pointer);
             return 0;
         }
@@ -511,15 +617,16 @@ private:
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL: {
             // The wheel is delivered to the focused window with screen
-            // coordinates; the body needs the client point.
+            // coordinates; the body needs the client point. Horizontal
+            // wheels carry their delta in wheel_x; vertical in wheel.
             POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &screen);
-            if (message == WM_MOUSEHWHEEL) return 0; // horizontal wheels: none yet
             Event wheel;
             wheel.type = EventType::PointerWheel;
             wheel.client = {screen.x, screen.y};
             wheel.screen = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            wheel.wheel = GET_WHEEL_DELTA_WPARAM(wp);
+            wheel.wheel = message == WM_MOUSEWHEEL ? GET_WHEEL_DELTA_WPARAM(wp) : 0;
+            wheel.wheel_x = message == WM_MOUSEHWHEEL ? GET_WHEEL_DELTA_WPARAM(wp) : 0;
             self.emit(*native, wheel);
             return 0;
         }
@@ -534,15 +641,33 @@ private:
                 break; // let the system leave its modal move loop
             }
             const bool alt_held = (GetKeyState(VK_MENU) & 0x8000) != 0;
-            self.emit(*native, {EventType::KeyDown, native->id, {}, {}, {},
-                                static_cast<int>(wp), (GetKeyState(VK_CONTROL) & 0x8000) != 0,
-                                (GetKeyState(VK_SHIFT) & 0x8000) != 0, alt_held});
+            Event key;
+            key.type = EventType::KeyDown;
+            key.key = static_cast<int>(wp);
+            key.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            key.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            key.alt = alt_held;
+            key.repeat = (lp & (1 << 30)) != 0;   // previous key-down bit
+            self.emit(*native, key);
             // Alt+F4 (close) and Alt+Space (system menu) stay with the system;
             // every other Alt combo (browser-style Back/Forward) is app input.
             if (message == WM_SYSKEYDOWN) {
                 if (wp != VK_F4 && wp != VK_SPACE) return 0;
                 break;
             }
+            return 0;
+        }
+        case WM_KEYUP:
+        case WM_SYSKEYUP: {
+            // Releases complete the key contract for clients that track
+            // held keys; the engine binds nothing to them.
+            Event key;
+            key.type = EventType::KeyUp;
+            key.key = static_cast<int>(wp);
+            key.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            key.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            key.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            self.emit(*native, key);
             return 0;
         }
         case WM_CHAR: {

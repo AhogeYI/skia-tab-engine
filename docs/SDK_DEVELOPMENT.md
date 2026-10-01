@@ -3,7 +3,8 @@
 This guide covers building the Windows SDK, changing TabEngine, validating a
 packaged consumer, and integrating the SDK into an application. It describes
 the current local build; it is not a GitHub publication procedure. TabEngine
-is licensed under Apache-2.0 and has no public remote yet.
+is licensed under Apache-2.0. Its public repository is
+https://github.com/AhogeYI/skia-tab-engine; release assets are published there.
 
 ## Scope and build inputs
 
@@ -157,7 +158,7 @@ cmake_minimum_required(VERSION 3.24)
 project(MyTabbedApp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(TABENGINE_SDK_ROOT "" CACHE PATH "Extracted TabEngine SDK root")
-find_package(TabEngine 0.1.0 EXACT CONFIG REQUIRED
+find_package(TabEngine 0.3.0 EXACT CONFIG REQUIRED
     PATHS "${TABENGINE_SDK_ROOT}" NO_DEFAULT_PATH)
 add_executable(my_tabbed_app main.cpp)
 target_link_libraries(my_tabbed_app PRIVATE TabEngine::SDK)

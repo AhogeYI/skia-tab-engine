@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(TabEngine VERSION 0.1.0 LANGUAGES CXX)
+project(TabEngine VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,23 @@ target_include_directories(tabengine_core PUBLIC
     $<INSTALL_INTERFACE:include>)
 set_target_properties(tabengine_core PROPERTIES EXPORT_NAME Core)
 
+# Automation control runtime: platform-neutral protocol values, registry,
+# queueing and observation. Depends on core only; the pinned JSON parser is
+# a private implementation detail of this target.
+add_library(tabengine_automation STATIC
+    src/automation/json_value.cpp
+    src/automation/errors.cpp
+    src/automation/schema.cpp
+    src/automation/artifacts.cpp
+    src/automation/runtime.cpp)
+target_include_directories(tabengine_automation PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_include_directories(tabengine_automation SYSTEM PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/json")
+target_link_libraries(tabengine_automation PUBLIC tabengine_core)
+set_target_properties(tabengine_automation PROPERTIES EXPORT_NAME Automation)
+
 # Test tree is a top-level development concern: add_subdirectory consumers
 # get libraries only and opt in explicitly with -DBUILD_TESTING=ON.
 if(PROJECT_IS_TOP_LEVEL)
@@ -20,6 +37,11 @@ if(BUILD_TESTING)
     add_executable(tabengine_core_test tests/core_test.cpp)
     target_link_libraries(tabengine_core_test PRIVATE tabengine_core)
     add_test(NAME tabengine_core_test COMMAND tabengine_core_test)
+
+    add_executable(tabengine_automation_test tests/automation_values_test.cpp
+        tests/automation_runtime_test.cpp)
+    target_link_libraries(tabengine_automation_test PRIVATE tabengine_automation)
+    add_test(NAME tabengine_automation_test COMMAND tabengine_automation_test)
 endif()
 
 option(TABENGINE_BUILD_WIN32_DEMO "Build the Win32 Skia reference host" OFF)
@@ -44,6 +66,10 @@ if(WIN32)
         add_executable(tabengine_wake_test tests/wake_test.cpp)
         target_link_libraries(tabengine_wake_test PRIVATE tabengine_win32)
         add_test(NAME tabengine_wake_test COMMAND tabengine_wake_test)
+
+        add_executable(tabengine_win32_platform_test tests/win32_platform_test.cpp)
+        target_link_libraries(tabengine_win32_platform_test PRIVATE tabengine_win32)
+        add_test(NAME tabengine_win32_platform_test COMMAND tabengine_win32_platform_test)
 
         add_executable(tabengine_ime_test tests/ime_test.cpp)
         target_link_libraries(tabengine_ime_test PRIVATE tabengine_win32)
@@ -97,19 +123,83 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     target_link_libraries(tabengine_skia PUBLIC
         d3d12 dxgi dxguid d3dcompiler windowscodecs ole32 uuid dwrite usp10 gdi32)
 
+    # Tests and demos must run unattended: a launch with the bundled DLL
+    # missing from PATH pops a system loader dialog and blocks the whole
+    # suite, so deploy skia.dll beside every executable that links the
+    # shell whenever the shared Skia package carries one.
+    function(tabengine_deploy_skia_dll target)
+        if(EXISTS "${TABENGINE_SKIA_ROOT}/bin/skia.dll")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TABENGINE_SKIA_ROOT}/bin/skia.dll"
+                    "$<TARGET_FILE_DIR:${target}>/skia.dll"
+                VERBATIM)
+        endif()
+    endfunction()
+
+
+    # Optional loopback HTTP transport: the only sockets in the engine.
+    # Windows-only for now; other platforms report the transport as absent.
+    add_library(tabengine_automation_transport STATIC
+        src/automation/transport_win32.cpp)
+    target_include_directories(tabengine_automation_transport PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_definitions(tabengine_automation_transport PRIVATE UNICODE _UNICODE)
+    target_link_libraries(tabengine_automation_transport
+        PUBLIC tabengine_automation PRIVATE ws2_32)
+    set_target_properties(tabengine_automation_transport PROPERTIES
+        EXPORT_NAME AutomationTransport)
+
+    # In-repo build of the SDK-only example (the packaged copy uses
+    # examples/automation_demo/CMakeLists.txt with find_package).
+    add_executable(tabengine_automation_demo examples/automation_demo/main.cpp)
+    target_compile_definitions(tabengine_automation_demo PRIVATE UNICODE _UNICODE
+        TABENGINE_DEMO_ENGINE_VERSION="${PROJECT_VERSION}")
+    target_include_directories(tabengine_automation_demo PRIVATE "${TABENGINE_SKIA_ROOT}")
+    target_compile_definitions(tabengine_automation_demo PRIVATE
+        SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
+    target_link_libraries(tabengine_automation_demo PRIVATE
+        tabengine_automation_shell tabengine_automation_transport)
+    tabengine_deploy_skia_dll(tabengine_automation_demo)
+
+    # Shell bridge: engine domains bound to one Shell (Window/Tab/Input/UI).
+    # Windows-only because the logical-key table and input synthesis route
+    # through the Win32 backend; links the Skia shell because Shell lives
+    # there.
+    add_library(tabengine_automation_shell STATIC
+        src/automation/shell_bridge.cpp
+        src/automation/shell_bridge_input.cpp
+        src/automation/shell_bridge_ui.cpp
+        src/automation/shell_bridge_capture.cpp)
+    target_include_directories(tabengine_automation_shell PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_definitions(tabengine_automation_shell PRIVATE UNICODE _UNICODE)
+    target_link_libraries(tabengine_automation_shell
+        PUBLIC tabengine_automation tabengine_skia tabengine_win32)
+    set_target_properties(tabengine_automation_shell PROPERTIES EXPORT_NAME AutomationShell)
+
     if(TABENGINE_INSTALL_SDK)
         if(NOT TARGET TabEngine::Skia)
             message(FATAL_ERROR "TABENGINE_INSTALL_SDK requires a shared Skia package with bin/skia.dll")
         endif()
         include(CMakePackageConfigHelpers)
         install(TARGETS tabengine_core tabengine_win32 tabengine_skia
+            tabengine_automation tabengine_automation_shell
+            tabengine_automation_transport
             EXPORT TabEngineTargets ARCHIVE DESTINATION lib)
         install(EXPORT TabEngineTargets FILE TabEngineTargets.cmake
             NAMESPACE TabEngine:: DESTINATION lib/cmake/TabEngine)
         install(DIRECTORY include/ DESTINATION include)
         install(FILES SDK_PACKAGE_README.md DESTINATION . RENAME README.md)
-        install(FILES docs/SDK_USER_GUIDE.md docs/API_REFERENCE.md DESTINATION docs)
+        install(FILES RELEASE_NOTES.md DESTINATION .)
+        install(FILES docs/SDK_USER_GUIDE.md docs/API_REFERENCE.md
+            docs/AUTOMATION_GUIDE.md docs/AUTOMATION_API_REFERENCE.md DESTINATION docs)
         install(DIRECTORY examples/sdk_hello_tabs/ DESTINATION examples/sdk_hello_tabs)
+        install(DIRECTORY examples/automation_demo/ DESTINATION examples/automation_demo)
+        install(DIRECTORY tools/automation/ DESTINATION tools/automation
+            PATTERN "__pycache__" EXCLUDE)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/include" DESTINATION skia)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/modules" DESTINATION skia OPTIONAL)
         install(DIRECTORY "${TABENGINE_SKIA_ROOT}/third_party" DESTINATION skia OPTIONAL)
@@ -138,6 +228,7 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_include_directories(tabengine_win32_demo PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_win32_demo PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_win32_demo PRIVATE tabengine_skia tabengine_win32)
+        tabengine_deploy_skia_dll(tabengine_win32_demo)
     endif()
 
     if(BUILD_TESTING)
@@ -145,26 +236,31 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_include_directories(tabengine_shell_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_shell_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_shell_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_shell_test)
         add_test(NAME tabengine_shell_test COMMAND tabengine_shell_test)
 
         add_executable(tabengine_shell_lifecycle_test tests/shell_lifecycle_test.cpp)
         target_include_directories(tabengine_shell_lifecycle_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_shell_lifecycle_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_shell_lifecycle_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_shell_lifecycle_test)
         add_test(NAME tabengine_shell_lifecycle_test COMMAND tabengine_shell_lifecycle_test)
 
         add_executable(tabengine_native_drag_cancel_test tests/native_drag_cancel_test.cpp)
         target_link_libraries(tabengine_native_drag_cancel_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_native_drag_cancel_test)
         add_test(NAME tabengine_native_drag_cancel_test COMMAND tabengine_native_drag_cancel_test)
 
         add_executable(tabengine_text_input_test tests/text_input_test.cpp)
         target_link_libraries(tabengine_text_input_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_text_input_test)
         add_test(NAME tabengine_text_input_test COMMAND tabengine_text_input_test)
 
         add_executable(tabengine_body_drag_test tests/body_drag_test.cpp)
         target_include_directories(tabengine_body_drag_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_body_drag_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_body_drag_test PRIVATE tabengine_skia)
+        tabengine_deploy_skia_dll(tabengine_body_drag_test)
         add_test(NAME tabengine_body_drag_test COMMAND tabengine_body_drag_test)
 
         add_executable(tabengine_windows_renderer_test tests/windows_renderer_test.cpp)
@@ -172,7 +268,25 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         target_include_directories(tabengine_windows_renderer_test PRIVATE "${TABENGINE_SKIA_ROOT}")
         target_compile_definitions(tabengine_windows_renderer_test PRIVATE SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
         target_link_libraries(tabengine_windows_renderer_test PRIVATE tabengine_skia user32)
+        tabengine_deploy_skia_dll(tabengine_windows_renderer_test)
         add_test(NAME tabengine_windows_renderer_test COMMAND tabengine_windows_renderer_test)
+
+        add_executable(tabengine_automation_bridge_test tests/automation_bridge_test.cpp)
+        target_include_directories(tabengine_automation_bridge_test PRIVATE "${TABENGINE_SKIA_ROOT}")
+        target_compile_definitions(tabengine_automation_bridge_test PRIVATE
+            SK_GANESH SK_DIRECT3D SK_BUILD_FOR_WIN)
+        target_link_libraries(tabengine_automation_bridge_test
+            PRIVATE tabengine_automation_shell tabengine_automation_transport)
+        tabengine_deploy_skia_dll(tabengine_automation_bridge_test)
+        add_test(NAME tabengine_automation_bridge_test COMMAND tabengine_automation_bridge_test)
+
+        add_executable(tabengine_automation_transport_test
+            tests/automation_transport_test.cpp)
+        target_compile_definitions(tabengine_automation_transport_test PRIVATE UNICODE _UNICODE)
+        target_link_libraries(tabengine_automation_transport_test
+            PRIVATE tabengine_automation_transport)
+        add_test(NAME tabengine_automation_transport_test
+            COMMAND tabengine_automation_transport_test)
     endif()
 endif()
 

@@ -9,6 +9,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 
@@ -60,6 +61,26 @@ public:
         auto it = surfaces_.find(id);
         if (it == surfaces_.end()) return {};
         return {RenderBackend::Raster, {it->second->width(), it->second->height()}};
+    }
+
+    bool supports_capture() const override { return true; }
+
+    bool capture_frame(WindowId id, CapturedFrame& out) override {
+        auto it = surfaces_.find(id);
+        if (it == surfaces_.end()) return false;
+        SkPixmap pixels;
+        if (!it->second->peekPixels(&pixels)) return false;
+        out.backend = RenderBackend::Raster;
+        out.size = {pixels.width(), pixels.height()};
+        const std::size_t row_bytes = static_cast<std::size_t>(pixels.width()) * 4;
+        out.pixels.resize(row_bytes * static_cast<std::size_t>(pixels.height()));
+        // The raster surface is plain CPU memory holding the last drawn
+        // frame; a row-wise copy keeps the source untouched.
+        for (int y = 0; y < pixels.height(); ++y) {
+            std::memcpy(out.pixels.data() + static_cast<std::size_t>(y) * row_bytes,
+                        pixels.addr32(0, y), row_bytes);
+        }
+        return true;
     }
 
 private:

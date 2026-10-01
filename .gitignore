@@ -1,7 +1,9 @@
 /build/
 /dist/
+/dist-automation/
 /third_party/skia/
 __pycache__/
 *.pyc
 /.vs/
 *.user
+node_modules/
