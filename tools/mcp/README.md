@@ -1,0 +1,53 @@
+# TabEngine MCP adapter
+
+Exposes a running TabEngine automation surface (the engine's own host or a
+product embedding it) as [Model Context Protocol](https://modelcontextprotocol.io)
+tools over stdio, for AI clients that speak MCP.
+
+```powershell
+npm install                              # pinned SDK, lockfile committed
+$env:TABENGINE_ENDPOINT = "http://127.0.0.1:53123"
+$env:TABENGINE_TOKEN = "<token>"
+node server.mjs                          # or: node tools/mcp/server.mjs from the repo root
+```
+
+## Connection modes
+
+| Mode | Environment | Notes |
+| ---- | ----------- | ----- |
+| Attach | `TABENGINE_ENDPOINT` + `TABENGINE_TOKEN` | Direct HTTP to a running instance. |
+| Descriptor | `TABENGINE_DESCRIPTOR` (file) + `TABENGINE_TOKEN`/`TABENGINE_TOKEN_FILE` | Reads the endpoint from the host's connection descriptor; the token never travels in the file next to it unless you choose `TABENGINE_TOKEN_FILE`. |
+| Explicit launch | `TABENGINE_LAUNCH` (command) + `TABENGINE_LAUNCH_DESCRIPTOR` (file the command writes) [+ `TABENGINE_TOKEN_FILE`] | The adapter spawns the host, waits for the descriptor, and terminates it with itself. |
+
+## Tools
+
+- `get_info` - instance identity, versions, capabilities.
+- `list_methods` - the full method catalogue (engine + application domains)
+  with grants and mutating flags.
+- `call_method` - invoke any listed method; mutating methods are refused
+  unless the adapter runs with `TABENGINE_ALLOW_MUTATIONS=1`.
+- `snapshot` - merged semantic tree of a window.
+- `click`, `type_text` - input synthesis (mutating, gated as above).
+- `screenshot` - captures the current frame and returns it as PNG image
+  content (the artifact bytes never hit a URL with the token in it).
+- `wait` - `activityQuiet` / `nodeAppears` / `operationDone` conditions.
+- `poll_events` - automation event stream with cursors.
+
+## Safety
+
+- Mutating tools are off unless `TABENGINE_ALLOW_MUTATIONS=1`.
+- The token is only used in the `Authorization` header; it never appears in
+  tool output, logs, or resource URIs.
+- The adapter talks to the loopback transport only; it does not open the
+  engine to other networks.
+
+## Self-check
+
+With a live instance (for example a headless product or the automation
+demo), run the handshake and one call per tool:
+
+```powershell
+$env:TABENGINE_ENDPOINT = "http://127.0.0.1:PORT"
+$env:TABENGINE_TOKEN = "<token>"
+npm run selfcheck                        # add TABENGINE_ALLOW_MUTATIONS=1 to verify clicks too
+```
