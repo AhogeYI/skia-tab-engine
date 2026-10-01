@@ -358,6 +358,28 @@ runtime.set_policy(&policy);
 - The packaged `examples/automation_demo` shows the whole host wiring and
   supports `--self-check`, which proves the packaged binary answers real
   protocol calls end to end.
+- **Web devtools panel** (`tools/devtools` in the SDK package): plain
+  HTML/CSS/JS, no web framework. Mount it before `transport.start()`:
+
+  ```cpp
+  tabengine::automation::DevtoolsPanel panel;
+  tabengine::automation::DevtoolsPanel::Options options;
+  options.resources_root = "<sdk>/tools/devtools";
+  (void)panel.mount(transport, options);
+  ```
+
+  then open `<endpoint>/automation/v1/panel` in a browser. The static
+  shell is served without a token (it contains no secrets and never
+  leaves the loopback boundary); the page asks for the token, keeps it in
+  memory only, and performs every data/action request through the
+  authenticated routes. The panel covers connection status, the window /
+  tab / node tree with per-node details and bounds-on-screenshot
+  overlay, capture with DPI-correct click mapping, controlled key/wheel/
+  text input behind an explicit write toggle, the schema-driven method
+  catalog with structured results and operation tracking plus
+  cooperative cancel, and bounded event/log polling with cursor-gap
+  reporting and a redacted diagnostics download. `automation_demo
+  --devtools-root tools/devtools` mounts the same panel.
 
 ## Testing your integration
 

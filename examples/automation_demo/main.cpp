@@ -14,6 +14,7 @@
 // capture) plus one artifact fetch with PNG validation, then prints a JSON
 // summary and exits 0.
 
+#include "tabengine/automation/devtools.h"
 #include "tabengine/automation/runtime.h"
 #include "tabengine/automation/shell_bridge.h"
 #include "tabengine/automation/transport.h"
@@ -510,6 +511,7 @@ int main(int argc, char** argv) {
     std::string token = "automation-demo-token";
     std::string descriptor_path;
     std::string token_path;
+    std::string devtools_root;
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if (argument == "--self-check") self_check = true;
@@ -517,9 +519,11 @@ int main(int argc, char** argv) {
         else if (argument == "--token" && i + 1 < argc) token = argv[++i];
         else if (argument == "--descriptor-out" && i + 1 < argc) descriptor_path = argv[++i];
         else if (argument == "--token-out" && i + 1 < argc) token_path = argv[++i];
+        else if (argument == "--devtools-root" && i + 1 < argc) devtools_root = argv[++i];
         else if (argument == "--help") {
             std::printf("usage: %s [--self-check] [--raster] [--token TOKEN]\n"
-                        "          [--descriptor-out FILE] [--token-out FILE]\n",
+                        "          [--descriptor-out FILE] [--token-out FILE]\n"
+                        "          [--devtools-root DIR]\n",
                         argv[0]);
             return 0;
         }
@@ -756,11 +760,28 @@ int main(int argc, char** argv) {
     automation::TransportConfig transport_config;
     transport_config.token = token;
     automation::AutomationTransport transport(runtime, transport_config);
+    // Optional web devtools panel: point --devtools-root at a checkout or
+    // SDK tools/devtools directory and open <endpoint>/automation/v1/panel.
+    bool panel_mounted = false;
+    if (!devtools_root.empty()) {
+        automation::DevtoolsPanel panel;
+        automation::DevtoolsPanel::Options panel_options;
+        panel_options.resources_root = devtools_root;
+        panel_mounted = panel.mount(transport, panel_options);
+        if (!panel_mounted) {
+            std::fprintf(stderr, "devtools root has no panel.html: %s\n",
+                         devtools_root.c_str());
+        }
+    }
     if (!transport.start()) {
         std::fprintf(stderr, "failed to start the automation transport\n");
         return 4;
     }
     std::printf("automation endpoint: %s\n", transport.endpoint().c_str());
+    if (panel_mounted) {
+        std::printf("devtools panel: %s/automation/v1/panel\n",
+                    transport.endpoint().c_str());
+    }
     std::printf("descriptor: %s\n", transport.describe().c_str());
     std::fflush(stdout);
     // Publish the connection descriptor and the token separately: tools read

@@ -1,0 +1,106 @@
+<!doctype html>
+<!-- TabEngine automation devtools panel. Served by the controlled process
+     on loopback; the token is entered below and kept in memory only. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TabEngine DevTools</title>
+<link rel="stylesheet" href="/automation/v1/panel/assets/panel.css">
+</head>
+<body>
+<header id="connect-bar">
+  <span class="brand">TabEngine DevTools</span>
+  <label>endpoint <input id="endpoint" size="22" value=""></label>
+  <label>token <input id="token" type="password" size="28" autocomplete="off"
+                      spellcheck="false" placeholder="paste control token"></label>
+  <button id="connect">Connect</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <span id="conn-status" class="status">disconnected</span>
+  <span id="conn-info" class="muted"></span>
+</header>
+<nav id="tabs">
+  <button data-tab="inspect" class="active">Inspect</button>
+  <button data-tab="capture">Capture &amp; Input</button>
+  <button data-tab="methods">Methods &amp; Tasks</button>
+  <button data-tab="events">Events / Logs</button>
+</nav>
+<main>
+  <section id="tab-inspect" class="tab active">
+    <div class="pane">
+      <div class="toolbar">
+        <button id="refresh-tree">Refresh</button>
+        <input id="tree-filter" placeholder="filter by key, role, name">
+        <label>snapshot <span id="snapshot-meta" class="muted"></span></label>
+      </div>
+      <div id="tree" class="scroll" role="tree"></div>
+    </div>
+    <div class="pane">
+      <div id="node-details" class="scroll mono">select a node</div>
+      <div id="node-actions" class="row"></div>
+    </div>
+  </section>
+  <section id="tab-capture" class="tab">
+    <div class="toolbar">
+      <button id="capture-shot">Capture</button>
+      <label><input type="checkbox" id="allow-write"> enable write actions</label>
+      <span id="shot-meta" class="muted"></span>
+    </div>
+    <div class="split">
+      <div id="shot-wrap" class="scroll">
+        <div id="shot-empty" class="muted">no capture yet</div>
+        <div id="shot-stage"><canvas id="shot-overlay"></canvas><img id="shot" alt="screenshot"></div>
+      </div>
+      <div id="input-panel" class="mono">
+        <p class="muted">Click on the image to send the mapped click. Coordinates map through the capture's scale (DPI), not the image size.</p>
+        <div class="row"><button id="input-refresh">Refresh capture</button></div>
+        <div class="row">
+          <label>key <input id="input-key" size="10" placeholder="e.g. ControlLeft"></label>
+          <button id="input-key-down">down</button> <button id="input-key-up">up</button>
+        </div>
+        <div class="row">
+          <label>text <input id="input-text" size="18"></label>
+          <button id="input-type">type text</button>
+        </div>
+        <div class="row">
+          <label>wheel <input id="input-wheel" type="number" value="1" size="3"></label>
+          <button id="input-wheel-send">send</button>
+        </div>
+        <div id="input-log" class="scroll mono"></div>
+      </div>
+    </div>
+  </section>
+  <section id="tab-methods" class="tab">
+    <div class="split">
+      <div class="pane">
+        <div class="toolbar">
+          <input id="method-filter" placeholder="filter methods">
+          <span id="method-count" class="muted"></span>
+        </div>
+        <div id="method-list" class="scroll mono"></div>
+      </div>
+      <div class="pane">
+        <div id="method-form" class="mono">select a method</div>
+        <pre id="method-result" class="scroll mono"></pre>
+        <div class="row" id="method-wait"></div>
+      </div>
+    </div>
+  </section>
+  <section id="tab-events" class="tab">
+    <div class="toolbar">
+      <button id="events-toggle">Start polling</button>
+      <span id="events-status" class="muted"></span>
+      <button id="events-clear">Clear</button>
+      <button id="logs-refresh">Fetch logs</button>
+      <button id="diag-download">Download diagnostics</button>
+    </div>
+    <div class="split">
+      <div id="events-list" class="scroll mono"></div>
+      <div id="logs-list" class="scroll mono"></div>
+    </div>
+  </section>
+</main>
+<div id="toast" hidden></div>
+<script type="module" src="/automation/v1/panel/assets/panel.js"></script>
+</body>
+</html>

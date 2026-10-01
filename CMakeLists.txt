@@ -141,7 +141,8 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
     # Optional loopback HTTP transport: the only sockets in the engine.
     # Windows-only for now; other platforms report the transport as absent.
     add_library(tabengine_automation_transport STATIC
-        src/automation/transport_win32.cpp)
+        src/automation/transport_win32.cpp
+        src/automation/devtools.cpp)
     target_include_directories(tabengine_automation_transport PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
@@ -287,6 +288,15 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
             PRIVATE tabengine_automation_transport)
         add_test(NAME tabengine_automation_transport_test
             COMMAND tabengine_automation_transport_test)
+
+        # Devtools panel static serving over the same transport.
+        add_executable(tabengine_devtools_panel_test
+            tests/devtools_panel_test.cpp)
+        target_compile_definitions(tabengine_devtools_panel_test PRIVATE UNICODE _UNICODE)
+        target_link_libraries(tabengine_devtools_panel_test
+            PRIVATE tabengine_automation_transport)
+        add_test(NAME tabengine_devtools_panel_test
+            COMMAND tabengine_devtools_panel_test)
     endif()
 endif()
 
