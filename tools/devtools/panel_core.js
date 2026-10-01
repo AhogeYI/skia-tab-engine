@@ -11,8 +11,13 @@ export const ARTIFACT_PATH = "/automation/v1/artifacts/";
 // Creates the JSON-RPC client over an injected `fetchText(path, options)`
 // where options = {method, headers, body}. `fetchText` returns
 // {status, body}. The client adds the bearer header itself; the token is
-// never placed in a path or query.
-export function createRpcClient(fetchText) {
+// never placed in a path or query. `transport.fetchBytes` (optional) must
+// return {status, bytes: ArrayBuffer} - artifacts are binary and must never
+// round-trip through text decoding.
+export function createRpcClient(transport) {
+  const fetchText = typeof transport === "function" ? transport : transport.fetchText;
+  const fetchBytes = typeof transport === "object" && transport.fetchBytes
+    ? transport.fetchBytes : null;
   let token = "";
   let nextId = 1;
   return {
@@ -56,12 +61,15 @@ export function createRpcClient(fetchText) {
     },
     artifactUrl(id) {
       // The fetch for artifacts adds the header at request time; callers
-      // must use fetchText(artifactUrl(id)) and never append the token.
+      // must use fetchArtifact(id) and never append the token.
       return ARTIFACT_PATH + encodeURIComponent(id);
     },
     async fetchArtifact(id) {
       if (!token) return { ok: false, error: "no token" };
-      const response = await fetchText(this.artifactUrl(id), {
+      if (!fetchBytes) {
+        return { ok: false, error: "transport cannot fetch binary artifacts" };
+      }
+      const response = await fetchBytes(this.artifactUrl(id), {
         method: "GET",
         headers: { "Authorization": "Bearer " + token },
         body: "",
@@ -70,7 +78,7 @@ export function createRpcClient(fetchText) {
       if (response.status !== 200) {
         return { ok: false, error: "artifact fetch failed: " + response.status };
       }
-      return { ok: true, body: response.body };
+      return { ok: true, bytes: response.bytes };
     },
   };
 }

@@ -10,7 +10,7 @@ import {
 const $ = (id) => document.getElementById(id);
 const el = (tag, text, cls) => {
   const node = document.createElement(tag);
-  if (text !== undefined) node.textContent = String(text);
+  if (text !== undefined && text !== null) node.textContent = String(text);
   if (cls) node.className = cls;
   return node;
 };
@@ -33,8 +33,21 @@ function fetchText(path, options) {
     return { status: response.status, body };
   }).finally(() => clearTimeout(timer));
 }
+// Artifacts are binary (PNG); text decoding would corrupt them.
+function fetchBytes(path, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), (options.timeoutS || 15) * 1000);
+  return fetch(endpoint + path, {
+    method: options.method,
+    headers: options.headers,
+    signal: controller.signal,
+  }).then(async (response) => {
+    const bytes = await response.arrayBuffer();
+    return { status: response.status, bytes };
+  }).finally(() => clearTimeout(timer));
+}
 
-const rpc = createRpcClient(fetchText);
+const rpc = createRpcClient({ fetchText, fetchBytes });
 const gate = createMutationGate();
 const events = createEventCursor();
 const state = {
@@ -120,9 +133,10 @@ async function refreshWindows() {
   const result = await rpc.call("Window.list");
   if (!result.ok) { toast("Window.list failed: " + result.error.message, true); return; }
   state.windows = result.result.windows || [];
-  if (!state.windows.some((w) => String(w.id) === String(state.windowId))) {
+  const idOf = (w) => String(w.windowId ?? w.id);
+  if (!state.windows.some((w) => idOf(w) === String(state.windowId))) {
     const first = state.windows[0];
-    state.windowId = first ? String(first.id) : null;
+    state.windowId = first ? idOf(first) : null;
     state.scale = first && first.scale ? Number(first.scale) : 1;
   }
   await refreshTree();
@@ -220,11 +234,9 @@ async function capture() {
   const artifact = await rpc.fetchArtifact(result.result.artifactId);
   if (!artifact.ok) { toast(artifact.error, true); return; }
   if (state.shot && state.shot.objectUrl) URL.revokeObjectURL(state.shot.objectUrl);
-  const bytes = new Uint8Array(artifact.body.length);
-  for (let i = 0; i < artifact.body.length; ++i) bytes[i] = artifact.body.charCodeAt(i) & 0xff;
   state.shot = {
     meta: result.result,
-    objectUrl: URL.createObjectURL(new Blob([bytes], { type: "image/png" })),
+    objectUrl: URL.createObjectURL(new Blob([artifact.bytes], { type: "image/png" })),
   };
   const img = $("shot");
   img.src = state.shot.objectUrl;
@@ -396,7 +408,7 @@ function stopPolling() {
 }
 async function pollOnce() {
   const result = await rpc.call("Event.poll",
-    { since: String(events.since), max: 100 }, 15);
+    { since: events.since, max: 100 }, 15);
   if (!state.polling) return;
   if (!result.ok) {
     $("events-status").textContent = "poll failed: " + result.error.message;
@@ -422,7 +434,7 @@ function appendEvent(event) {
   box.scrollTop = box.scrollHeight;
 }
 async function refreshLogs() {
-  const result = await rpc.call("Log.read", { afterSequence: 0, max: 200 });
+  const result = await rpc.call("Log.read", { after: 0, appAfter: 0, max: 200 });
   if (!result.ok) { toast("log read failed: " + result.error.message, true); return; }
   state.logs = [];
   const box = $("logs-list");

@@ -29,21 +29,39 @@ function makeTransport(responses) {
     const out = typeof responder === "function" ? responder(options) : responder;
     return out;
   };
-  return { requests, fetchText };
+  const fetchBytes = async (path, options) => {
+    requests.push({ path, options, binary: true });
+    const key = "BYTES " + options.method + " " + path;
+    const responder = responses[key] || responses.default;
+    const out = typeof responder === "function" ? responder(options) : responder;
+    // The binary channel must yield ArrayBuffer bytes verbatim.
+    return { status: out.status, bytes: out.bytes instanceof ArrayBuffer
+      ? out.bytes : new TextEncoder().encode(out.body || "").buffer };
+  };
+  return { requests, fetchText, fetchBytes };
 }
 
 // ---- token policy --------------------------------------------------------
 {
+  const pngMagic = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 255]);
+  const pngBuffer = pngMagic.buffer.slice(pngMagic.byteOffset,
+                                          pngMagic.byteOffset + pngMagic.byteLength);
   const transport = makeTransport({
     default: { status: 200, body: '{"jsonrpc":"2.0","id":"1","result":{}}' },
+    "BYTES GET /automation/v1/artifacts/a1": { status: 200, bytes: pngBuffer },
   });
-  const client = createRpcClient(transport.fetchText);
+  const client = createRpcClient(transport);
   check(!client.hasToken(), "starts without a token");
   const missing = await client.call("System.getInfo");
   check(!missing.ok && missing.error.code === 0, "refuses calls without a token");
   client.setToken("secret-token-1234567890");
   await client.call("System.getInfo");
-  await client.fetchArtifact("a1");
+  const artifact = await client.fetchArtifact("a1");
+  check(artifact.ok, "artifact fetch succeeds over the binary channel");
+  const round = new Uint8Array(artifact.bytes);
+  check(round.length === pngMagic.length &&
+        pngMagic.every((byte, index) => round[index] === byte),
+        "artifact bytes survive byte-for-byte (no text decoding)");
   for (const request of transport.requests) {
     check(request.path.indexOf("secret-token") < 0,
           "token absent from URL " + request.path);
@@ -53,6 +71,7 @@ function makeTransport(responses) {
   }
   check(transport.requests[0].path === RPC_PATH, "rpc hits the engine route");
   check(transport.requests[1].path === ARTIFACT_PATH + "a1", "artifact path is id-only");
+  check(transport.requests[1].binary, "artifacts use the binary channel");
 }
 
 // ---- rpc error surfaces --------------------------------------------------

@@ -508,6 +508,7 @@ int run_self_check(std::uint16_t port, const std::string& token, int& steps) {
 int main(int argc, char** argv) {
     bool self_check = false;
     bool force_raster = false;
+    bool hidden = false;
     std::string token = "automation-demo-token";
     std::string descriptor_path;
     std::string token_path;
@@ -516,12 +517,13 @@ int main(int argc, char** argv) {
         const std::string argument = argv[i];
         if (argument == "--self-check") self_check = true;
         else if (argument == "--raster") force_raster = true;
+        else if (argument == "--hidden") hidden = true;
         else if (argument == "--token" && i + 1 < argc) token = argv[++i];
         else if (argument == "--descriptor-out" && i + 1 < argc) descriptor_path = argv[++i];
         else if (argument == "--token-out" && i + 1 < argc) token_path = argv[++i];
         else if (argument == "--devtools-root" && i + 1 < argc) devtools_root = argv[++i];
         else if (argument == "--help") {
-            std::printf("usage: %s [--self-check] [--raster] [--token TOKEN]\n"
+            std::printf("usage: %s [--self-check] [--raster] [--hidden] [--token TOKEN]\n"
                         "          [--descriptor-out FILE] [--token-out FILE]\n"
                         "          [--devtools-root DIR]\n",
                         argv[0]);
@@ -751,7 +753,7 @@ int main(int argc, char** argv) {
     });
 
     const tabengine::WindowId window =
-        shell.open_window({120, 120, 720, 460}, true, !self_check);
+        shell.open_window({120, 120, 720, 460}, true, !self_check && !hidden);
     if (!window) {
         std::fprintf(stderr, "failed to open the window\n");
         return 3;

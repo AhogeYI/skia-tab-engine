@@ -132,6 +132,22 @@ bool is_loopback_host_header(const std::string& host) {
     return name == "127.0.0.1" || name == "localhost" || name == "::1";
 }
 
+// Origin is a full URL ("http://127.0.0.1:8799"), unlike Host which is
+// "host:port". Browsers attach Origin even to same-origin module fetches,
+// so the scheme must be stripped before the host form applies.
+bool is_loopback_origin_header(const std::string& origin) {
+    std::string_view value = origin;
+    const std::size_t scheme = value.find("://");
+    if (scheme != std::string_view::npos) {
+        value = value.substr(scheme + 3);
+    }
+    const std::size_t path = value.find('/');
+    if (path != std::string_view::npos) {
+        value = value.substr(0, path);
+    }
+    return is_loopback_host_header(std::string(value));
+}
+
 std::string http_status_text(int status) {
     switch (status) {
     case 200: return "200 OK";
@@ -527,7 +543,7 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     // Host and Origin must both look loopback; a browser page served from
     // anywhere else cannot reach this service even if it learns the token.
     if (!is_loopback_host_header(host) ||
-        (!origin.empty() && !is_loopback_host_header(origin))) {
+        (!origin.empty() && !is_loopback_origin_header(origin))) {
         bump([](Stats& stats) { ++stats.rejected; });
         send_simple(socket, 403, "application/json",
                     json_error_payload(403, "non-loopback host"), monotonic() + config.io_timeout_s);
