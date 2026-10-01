@@ -132,6 +132,15 @@ public:
     // placement applies). UI-thread only, called synchronously from the
     // platform layer.
     virtual void set_ime_caret_provider(std::function<Rect(WindowId)> provider) {}
+    // Optional Windows UI Automation delegation: the backend answers
+    // WM_GETOBJECT for the UIA root object by handing the registered
+    // provider to UiaReturnRawElementProvider. The engine never interprets
+    // the pointer (the application owns the provider object and its
+    // lifetime); pass nullptr to clear. UI-thread only.
+    virtual void set_uia_root_provider(WindowId id, void* provider) {
+        (void)id;
+        (void)provider;
+    }
     virtual bool create(WindowId id, Rect bounds, std::string_view title, bool visible) = 0;
     virtual void show(WindowId id) = 0;
     virtual void destroy(WindowId id) = 0;

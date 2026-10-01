@@ -7,6 +7,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>
+#include <UIAutomationCore.h>
+#include <UIAutomationCoreApi.h>
+#pragma comment(lib, "UIAutomationCore.lib")
 
 #include <cstdio>
 #include <memory>
@@ -100,11 +104,67 @@ int check_hide_show(tabengine::IPlatform& platform) {
     return 0;
 }
 
+// A minimal IRawElementProviderSimple stand-in: UiaReturnRawElementProvider
+// only passes the pointer through, so the delegation test needs a stable
+// address, not a working provider.
+struct StandInProvider : IRawElementProviderSimple {
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 0; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions*) override {
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID, IUnknown**) override {
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID, VARIANT*) override {
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(
+        IRawElementProviderSimple**) override {
+        return E_NOTIMPL;
+    }
+};
+
+int check_uia_root_delegation(tabengine::IPlatform& platform) {
+    constexpr tabengine::WindowId id = 41;
+    if (!platform.create(id, {40, 50, 360, 240}, "uia test", false)) {
+        return fail("create (uia)");
+    }
+    HWND hwnd = static_cast<HWND>(platform.native_handle(id));
+    // Without a provider the message keeps its default answer.
+    const LRESULT unregistered =
+        SendMessageW(hwnd, WM_GETOBJECT, 0, static_cast<LPARAM>(UiaRootObjectId));
+    // With one, the window returns the UIA element handle for it.
+    StandInProvider stand_in;
+    platform.set_uia_root_provider(id, &stand_in);
+    const LRESULT delegated =
+        SendMessageW(hwnd, WM_GETOBJECT, 0, static_cast<LPARAM>(UiaRootObjectId));
+    // Clearing restores the default answer.
+    platform.set_uia_root_provider(id, nullptr);
+    const LRESULT cleared =
+        SendMessageW(hwnd, WM_GETOBJECT, 0, static_cast<LPARAM>(UiaRootObjectId));
+    platform.destroy(id);
+    if (delegated == 0) {
+        std::printf("FAIL uia delegation returned 0\n");
+        return 1;
+    }
+    if (cleared != unregistered) {
+        std::printf("FAIL uia clear did not restore the default answer\n");
+        return 1;
+    }
+    std::printf("uia root delegation passed\n");
+    return 0;
+}
+
 int main() {
     std::unique_ptr<tabengine::IPlatform> platform = tabengine::make_win32_platform();
     if (!platform) return fail("make_win32_platform");
     if (const int result = check_set_client_bounds(*platform)) return result;
     if (const int result = check_hide_show(*platform)) return result;
+    if (const int result = check_uia_root_delegation(*platform)) return result;
     std::printf("win32 platform bounds test passed\n");
     return 0;
 }

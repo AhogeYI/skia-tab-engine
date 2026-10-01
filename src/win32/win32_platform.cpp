@@ -7,6 +7,10 @@
 #include <dwmapi.h>
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
+#include <objbase.h>
+#include <UIAutomationCore.h>
+#include <UIAutomationCoreApi.h>
+#pragma comment(lib, "UIAutomationCore.lib")
 
 #include <algorithm>
 #include <memory>
@@ -118,6 +122,11 @@ public:
         ime_caret_ = std::move(provider);
     }
 
+    void set_uia_root_provider(WindowId id, void* provider) override {
+        const auto found = windows_.find(id);
+        if (found != windows_.end()) found->second->uia_root_provider = provider;
+    }
+
     void wake() override {
         // Post, never send: a synchronous SendMessage would run the handler on
         // the waking thread instead of the pumping thread.
@@ -183,6 +192,7 @@ public:
         auto it = windows_.find(id);
         if (it == windows_.end()) return;
         HWND hwnd = it->second->hwnd;
+        it->second->uia_root_provider = nullptr;
         if (hwnd) DestroyWindow(hwnd);
         windows_.erase(it);
         if (windows_.empty()) PostQuitMessage(0);
@@ -392,6 +402,9 @@ private:
         bool stepwise_move = false;
         bool tracking_mouse = false;
         bool frame_pending = false;
+        // Application-registered UIA root provider (opaque here); answered
+        // verbatim in WM_GETOBJECT. Cleared when the window is destroyed.
+        void* uia_root_provider = nullptr;
     };
 
     inline static thread_local Native* move_hook_native_ = nullptr;
@@ -465,6 +478,18 @@ private:
         if (!native) return DefWindowProcW(hwnd, message, wp, lp);
         Win32Platform& self = *native->platform;
         switch (message) {
+        case WM_GETOBJECT:
+            // UIA root queries route to the application's provider; the
+            // engine never interprets it. Everything else stays default so
+            // MSAA requests keep their standard answer.
+            if (static_cast<DWORD>(lp) == UiaRootObjectId &&
+                native->uia_root_provider) {
+                return UiaReturnRawElementProvider(
+                    hwnd, wp, lp,
+                    static_cast<IRawElementProviderSimple*>(
+                        native->uia_root_provider));
+            }
+            break;
         case WM_NCCALCSIZE:
             if (wp) return 0;
             break;
