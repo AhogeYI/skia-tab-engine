@@ -87,6 +87,7 @@ public:
         std::uint64_t rejected = 0;      // auth/framing/origin refusals
         std::uint64_t auth_failures = 0;
         std::uint64_t timeouts = 0;
+        std::uint64_t peer_resets = 0;   // hard disconnects mid-request
         std::uint64_t active_connections = 0;
     };
     [[nodiscard]] Stats stats() const;

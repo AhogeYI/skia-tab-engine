@@ -561,6 +561,142 @@ void test_response_timeout_cancels_side_effects() {
     transport.stop();
 }
 
+// A hard reset mid-request cancels the in-flight work: a queued mutation
+// never executes once its peer is gone. Nothing retries it afterwards.
+void test_peer_reset_cancels_queued_request() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0", "reset-test"}, std::ref(clock)};
+    TransportConfig config;
+    config.token = "tok";
+    config.response_timeout_s = 2.0;
+    AutomationTransport transport{runtime, config};
+    CHECK(transport.start());
+
+    std::atomic<int> mutations{0};
+    automation::MethodDescriptor descriptor;
+    descriptor.name = "app.review.mutate";
+    descriptor.summary = "counts executions";
+    JsonValue params = JsonValue::object();
+    params.set("type", "object");
+    params.set("properties", JsonValue::object());
+    descriptor.params = std::move(params);
+    const auto registration =
+        runtime.register_methods("app.review", {descriptor},
+                                 [&](const automation::RequestContext&,
+                                     automation::CompletionSink sink) {
+                                     ++mutations;
+                                     sink(automation::MethodOutcome::success(
+                                         JsonValue::object()));
+                                 });
+    CHECK(registration.valid());
+
+    const std::string body = R"({"jsonrpc":"2.0","id":"m","method":"app.review.mutate"})";
+    SOCKET client = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(transport.port());
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    CHECK(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const std::string request =
+        "POST /automation/v1/rpc HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Authorization: Bearer tok\r\nContent-Type: application/json\r\n"
+        "Content-Length: " +
+        std::to_string(body.size()) + "\r\n\r\n" + body;
+    CHECK(send(client, request.data(), static_cast<int>(request.size()), 0) ==
+          static_cast<int>(request.size()));
+    // The transport took the request; the UI never drains, so it stays
+    // queued while the peer is still connected.
+    const auto submitted_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (transport.stats().requests == 0 &&
+           std::chrono::steady_clock::now() < submitted_by) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(transport.stats().requests == 1);
+    // Abortive close sends RST: the in-flight request is cancelled.
+    linger abortive{1, 0};
+    CHECK(setsockopt(client, SOL_SOCKET, SO_LINGER,
+                     reinterpret_cast<const char*>(&abortive), sizeof(abortive)) == 0);
+    closesocket(client);
+    const auto noticed_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (transport.stats().peer_resets == 0 &&
+           std::chrono::steady_clock::now() < noticed_by) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(transport.stats().peer_resets == 1);
+    runtime.drain(clock.now_value + 10.0);
+    CHECK(mutations.load() == 0);
+    transport.stop();
+}
+
+// An orderly half-close is legitimate HTTP: the client may close its send
+// side and still read the reply, so the request keeps running and the
+// response lands on the half-closed socket.
+void test_half_close_keeps_request_and_reply_lands() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.1.0", "halfclose-test"}, std::ref(clock)};
+    TransportConfig config;
+    config.token = "tok";
+    config.response_timeout_s = 2.0;
+    AutomationTransport transport{runtime, config};
+    CHECK(transport.start());
+
+    std::vector<automation::CompletionSink> parked;
+    automation::MethodDescriptor descriptor;
+    descriptor.name = "app.review.defer";
+    descriptor.summary = "defers its completion";
+    JsonValue params = JsonValue::object();
+    params.set("type", "object");
+    params.set("properties", JsonValue::object());
+    descriptor.params = std::move(params);
+    const auto registration = runtime.register_methods(
+        "app.review", {descriptor},
+        [&](const automation::RequestContext&, automation::CompletionSink sink) {
+            parked.push_back(std::move(sink));
+        });
+    CHECK(registration.valid());
+
+    const std::string body = R"({"jsonrpc":"2.0","id":"d","method":"app.review.defer"})";
+    SOCKET client = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(transport.port());
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    CHECK(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const std::string request =
+        "POST /automation/v1/rpc HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Authorization: Bearer tok\r\nContent-Type: application/json\r\n"
+        "Content-Length: " +
+        std::to_string(body.size()) + "\r\n\r\n" + body;
+    CHECK(send(client, request.data(), static_cast<int>(request.size()), 0) ==
+          static_cast<int>(request.size()));
+    const auto submitted_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (transport.stats().requests == 0 &&
+           std::chrono::steady_clock::now() < submitted_by) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    // Execute the handler (it parks its completion) and half-close.
+    runtime.drain(clock.now_value);
+    CHECK(parked.size() == 1);
+    CHECK(shutdown(client, SD_SEND) == 0);
+    // Completing the deferred work must still deliver the reply.
+    parked.front()(automation::MethodOutcome::success(JsonValue::object()));
+    DWORD timeout_ms = 3000;
+    CHECK(setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == 0);
+    char buffer[4096];
+    std::string raw;
+    while (raw.find("\r\n\r\n") == std::string::npos) {
+        const int got = recv(client, buffer, sizeof(buffer), 0);
+        if (got <= 0) break;
+        raw.append(buffer, static_cast<std::size_t>(got));
+    }
+    closesocket(client);
+    CHECK(raw.size() > 12);
+    CHECK(raw.substr(9, 3) == "200");
+    CHECK(transport.stats().peer_resets == 0);
+    transport.stop();
+}
+
 // Artifact downloads go through the same session authorization and observe
 // grant as every RPC (regression: the byte route used to bypass policy).
 void test_artifact_route_uses_policy_and_grants() {
@@ -923,6 +1059,8 @@ int main() {
     test_concurrent_session_limit();
     test_slow_response_reader_bounded_stop();
     test_response_timeout_cancels_side_effects();
+    test_peer_reset_cancels_queued_request();
+    test_half_close_keeps_request_and_reply_lands();
     test_artifact_route_uses_policy_and_grants();
     test_artifact_ttl_expires_without_drain();
     test_slow_client_deadline_and_bounded_stop();

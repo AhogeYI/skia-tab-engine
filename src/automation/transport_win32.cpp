@@ -349,9 +349,11 @@ struct AutomationTransport::Impl {
     // One JSON-RPC exchange against the runtime with the transport's
     // deadline and cancellation; returns the envelope ("" on timeout/stop).
     // Shared by the RPC route and the host-mounted route handler's `call`.
+    // `peer` (when valid) is watched while the request is in flight.
     [[nodiscard]] std::string rpc_round_trip(std::uint64_t connection, std::string body,
                                              double timeout_s,
-                                             const std::string& session = std::string{});
+                                             const std::string& session = std::string{},
+                                             SOCKET peer = INVALID_SOCKET);
     static std::string url_path_only(const std::string& target) {
         const std::size_t query = target.find('?');
         return query == std::string::npos ? target : target.substr(0, query);
@@ -360,7 +362,8 @@ struct AutomationTransport::Impl {
 
 std::string AutomationTransport::Impl::rpc_round_trip(std::uint64_t connection,
                                                       std::string body, double timeout_s,
-                                                      const std::string& session) {
+                                                      const std::string& session,
+                                                      SOCKET peer) {
     const double wait_s = timeout_s > 0.0 ? timeout_s : config.response_timeout_s;
     if (!session.empty()) {
         // The caller pinned a logical session: run on its identity.
@@ -387,9 +390,35 @@ std::string AutomationTransport::Impl::rpc_round_trip(std::uint64_t connection,
     std::string payload;
     {
         std::unique_lock<std::mutex> lock(pending->mutex);
-        if (!pending->ready.wait_for(lock, std::chrono::duration<double>(wait_s),
-                                     [&] { return pending->responded || stop_.load(); })) {
-            bump([](Stats& stats) { ++stats.timeouts; });
+        // Disconnect contract while the request is in flight: an orderly
+        // half-close (peer FIN) is legitimate HTTP - the client may have
+        // closed only its send side and still reads the reply, so the
+        // request keeps running. A hard reset means the peer is gone:
+        // the loop aborts and the cancellation below drops the request
+        // (queued work never executes; executing work settles Cancelled
+        // at the next drain). Nothing is retried or rolled back.
+        const double deadline = monotonic() + wait_s;
+        while (!pending->responded && !stop_.load()) {
+            const double now_value = monotonic();
+            if (now_value >= deadline) {
+                bump([](Stats& stats) { ++stats.timeouts; });
+                break;
+            }
+            const double slice = std::min(0.05, deadline - now_value);
+            pending->ready.wait_for(lock, std::chrono::duration<double>(slice),
+                                    [&] { return pending->responded || stop_.load(); });
+            if (pending->responded || stop_.load()) break;
+            if (peer == INVALID_SOCKET) continue;
+            char probe = 0;
+            const int seen = recv(peer, &probe, 1, MSG_PEEK);
+            if (seen > 0) continue; // pipelined bytes; not parsed here
+            if (seen == 0) continue; // half-close: the reply may still land
+            const int error = WSAGetLastError();
+            if (error == WSAECONNRESET || error == WSAECONNABORTED) {
+                bump([](Stats& stats) { ++stats.peer_resets; });
+                break;
+            }
+            // WSAEWOULDBLOCK and friends: no data and no disconnect yet.
         }
         payload = pending->payload;
     }
@@ -679,9 +708,10 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
                 };
             const RouteReply host_reply = route_handler(
                 host_request,
-                [this, connection](std::string payload, double timeout_s,
-                                    const std::string& session) {
-                    return rpc_round_trip(connection, std::move(payload), timeout_s, session);
+                [this, connection, socket](std::string payload, double timeout_s,
+                                           const std::string& session) {
+                    return rpc_round_trip(connection, std::move(payload), timeout_s, session,
+                                          socket);
                 },
                 artifact_reader);
             if (host_reply.status != 0) {
@@ -711,10 +741,12 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
 
     bump([](Stats& stats) { ++stats.requests; });
     // The response timeout also caps the runtime deadline, and the returned
-    // handle cancels the request when the transport gives up on it, so a
-    // queued mutation never executes after the client saw a failure.
+    // handle cancels the request when the transport gives up on it (or the
+    // peer hard-resets), so a queued mutation never executes after the
+    // client saw a failure.
     std::string payload =
-        rpc_round_trip(connection, std::move(body), config.response_timeout_s);
+        rpc_round_trip(connection, std::move(body), config.response_timeout_s,
+                       std::string{}, socket);
 
     if (payload.empty()) {
         send_simple(socket, 503, "application/json",
