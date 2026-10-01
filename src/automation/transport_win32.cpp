@@ -7,9 +7,9 @@
 //
 // Lifecycle rules:
 //  - Every socket read/write runs against an ABSOLUTE deadline (checked in
-//    <= 250 ms slices) and aborts on stop, so a slow client cannot extend
-//    its own budget and stop() joins within a bounded delay without ever
-//    closing a socket from another thread.
+//    <= 250 ms slices). Reads abort on stop; completed replies may flush
+//    until their write deadline. A slow client cannot extend that budget,
+//    and no socket is closed from another thread.
 //  - The listener is closed only after the accept thread joined (single
 //    owner at a time).
 //  - Workers publish a finished flag; the accept loop reaps only finished
@@ -289,6 +289,7 @@ struct AutomationTransport::Impl {
         while (sent < size) {
             if (!wait_socket(socket, /*write=*/true, deadline, stop_aborts)) return false;
             const int result = send(socket, data + sent, static_cast<int>(size - sent), 0);
+            if (result == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
             if (result <= 0) return false;
             sent += static_cast<std::size_t>(result);
         }
@@ -301,6 +302,7 @@ struct AutomationTransport::Impl {
         while (received < size) {
             if (!wait_socket(socket, /*write=*/false, deadline)) return false;
             const int result = recv(socket, data + received, static_cast<int>(size - received), 0);
+            if (result == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
             if (result <= 0) return false;
             received += static_cast<std::size_t>(result);
         }
@@ -449,6 +451,7 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
             return;
         }
         const int result = recv(socket, buffer, sizeof(buffer), 0);
+        if (result == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
         if (result <= 0) return;
         received.append(buffer, static_cast<std::size_t>(result));
         if (received.size() > kMaxHeaderBytes + config.body_bytes) {
@@ -579,10 +582,14 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
     if (method == "POST" && path == "/automation/v1/session") {
         bool limit_reached = false;
         std::vector<std::uint64_t> closed;
+        const std::string id = make_session_token();
         {
             std::lock_guard<std::mutex> guard(sessions_mutex);
             closed = sweep_idle_sessions_locked();
             limit_reached = sessions.size() >= config.max_sessions;
+            if (!limit_reached) {
+                sessions.emplace(id, LogicalSession{next_connection.fetch_add(1), monotonic()});
+            }
         }
         close_connections_on_runtime(closed);
         if (limit_reached) {
@@ -590,11 +597,6 @@ void AutomationTransport::Impl::handle_connection(SOCKET socket, std::uint64_t c
             send_simple(socket, 429, "application/json",
                         json_error_payload(429, "session limit reached"), respond_deadline);
             return;
-        }
-        const std::string id = make_session_token();
-        {
-            std::lock_guard<std::mutex> guard(sessions_mutex);
-            sessions.emplace(id, LogicalSession{next_connection.fetch_add(1), monotonic()});
         }
         JsonValue result = JsonValue::object();
         result.set("sessionId", id);
@@ -819,6 +821,15 @@ void AutomationTransport::Impl::accept_loop() {
             reap_finished_workers();
             continue;
         }
+        // select() only guarantees some space/data, not that a large
+        // blocking send will finish. Keep the actual I/O nonblocking so
+        // response deadlines also bound slow screenshot consumers.
+        u_long nonblocking = 1;
+        if (ioctlsocket(client, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+            closesocket(client);
+            bump([](Stats& stats) { ++stats.rejected; });
+            continue;
+        }
         // Reserve the concurrency slot before spawning, so admission cannot
         // be raced by workers that have not started yet.
         {
@@ -962,7 +973,8 @@ void AutomationTransport::stop() {
         std::lock_guard<std::mutex> guard(impl.pendings_mutex);
         impl.pendings.clear();
     }
-    // Worker I/O aborts on stop within one slice; joins are bounded.
+    // Reads abort within one slice. Reply writes may flush until their
+    // absolute I/O deadline; nonblocking sockets keep joins bounded.
     {
         std::lock_guard<std::mutex> guard(impl.workers_mutex);
         for (Impl::Worker& worker : impl.workers) {
@@ -1023,10 +1035,19 @@ void AutomationTransport::set_route_handler(RouteHandler handler) {
 
 std::string AutomationTransport::create_session() {
     const std::string id = make_session_token();
-    std::lock_guard<std::mutex> guard(impl_->sessions_mutex);
-    impl_->sessions.emplace(id, Impl::LogicalSession{impl_->next_connection.fetch_add(1),
-                                                     impl_->monotonic()});
-    return id;
+    std::vector<std::uint64_t> closed;
+    bool accepted = false;
+    {
+        std::lock_guard<std::mutex> guard(impl_->sessions_mutex);
+        closed = impl_->sweep_idle_sessions_locked();
+        if (impl_->sessions.size() < impl_->config.max_sessions) {
+            impl_->sessions.emplace(id, Impl::LogicalSession{impl_->next_connection.fetch_add(1),
+                                                             impl_->monotonic()});
+            accepted = true;
+        }
+    }
+    impl_->close_connections_on_runtime(closed);
+    return accepted ? id : std::string{};
 }
 
 void AutomationTransport::set_auth_failure_callback(

@@ -1216,7 +1216,7 @@ void AutomationRuntime::set_deferred_wake(std::function<void(double)> wake) {
 
 void AutomationRuntime::receive(std::uint64_t connection, std::uint64_t transport_request,
                                 std::string payload) {
-    receive_with_deadline(connection, transport_request, std::move(payload), 0.0);
+    (void)receive_with_deadline(connection, transport_request, std::move(payload), 0.0);
 }
 
 std::shared_ptr<RequestCancellation> AutomationRuntime::receive_with_deadline(

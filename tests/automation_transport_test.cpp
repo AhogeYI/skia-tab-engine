@@ -437,8 +437,80 @@ void test_session_idle_expiry_and_limit() {
     CHECK(begin_session().status == 200);
     const HttpResponse capped = begin_session();
     CHECK(capped.status == 429);
+    CHECK(transport.create_session().empty()); // Host minting shares the cap.
 
     transport.stop();
+}
+
+void test_concurrent_session_limit() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.2.0", "session-limit"}, std::ref(clock)};
+    TransportConfig config;
+    config.token = "tok";
+    config.max_sessions = 1;
+    config.max_connections = 16;
+    config.session_idle_timeout_s = 0;
+    AutomationTransport transport{runtime, config};
+    CHECK(transport.start());
+    std::atomic<bool> go{false};
+    std::atomic<int> ready{0};
+    std::atomic<int> accepted{0};
+    std::vector<std::thread> clients;
+    for (int i = 0; i < 8; ++i) {
+        clients.emplace_back([&] {
+            ++ready;
+            while (!go.load()) std::this_thread::yield();
+            const auto response = http_request(transport.port(),
+                "POST /automation/v1/session HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Authorization: Bearer tok\r\n\r\n");
+            CHECK(response.status == 200 || response.status == 429);
+            if (response.status == 200) ++accepted;
+        });
+    }
+    while (ready.load() != 8) std::this_thread::yield();
+    go.store(true);
+    for (auto& client : clients) client.join();
+    CHECK(accepted.load() == 1);
+    transport.stop();
+}
+
+void test_slow_response_reader_bounded_stop() {
+    Clock clock;
+    AutomationRuntime runtime{{}, {"1.0", "0.2.0", "slow-response"}, std::ref(clock)};
+    TransportConfig config;
+    config.token = "tok";
+    config.io_timeout_s = 0.4;
+    AutomationTransport transport{runtime, config};
+    transport.set_route_handler([](const auto&, const auto&, const auto&) {
+        return AutomationTransport::RouteReply{200, "application/octet-stream",
+                                               std::string(8 * 1024 * 1024, 'x')};
+    });
+    CHECK(transport.start());
+    SOCKET client = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    CHECK(client != INVALID_SOCKET);
+    const int receive_bytes = 1024;
+    CHECK(setsockopt(client, SOL_SOCKET, SO_RCVBUF,
+                     reinterpret_cast<const char*>(&receive_bytes), sizeof(receive_bytes)) == 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(transport.port());
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    CHECK(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    const std::string request = "GET /large-response HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                "Authorization: Bearer tok\r\n\r\n";
+    CHECK(send(client, request.data(), static_cast<int>(request.size()), 0) ==
+          static_cast<int>(request.size()));
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(client, &readable);
+    timeval timeout{2, 0};
+    CHECK(select(0, &readable, nullptr, nullptr, &timeout) > 0);
+    // Leave the response unread. stop must respect the write deadline,
+    // without relying on another thread to close a blocked socket.
+    const auto started = std::chrono::steady_clock::now();
+    transport.stop();
+    CHECK(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < 1.5);
+    closesocket(client);
 }
 
 // The transport response timeout must cancel the runtime request: a queued
@@ -848,6 +920,8 @@ int main() {
     test_bind_conflict();
     test_sessions_begin_use_end();
     test_session_idle_expiry_and_limit();
+    test_concurrent_session_limit();
+    test_slow_response_reader_bounded_stop();
     test_response_timeout_cancels_side_effects();
     test_artifact_route_uses_policy_and_grants();
     test_artifact_ttl_expires_without_drain();

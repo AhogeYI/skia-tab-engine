@@ -92,7 +92,7 @@ struct ShellAutomationBridge::Impl : ShellObserver {
     // Application provider subtrees use slots above the engine kinds.
     static constexpr unsigned kNodeProviderBase = 9;
 
-    // ---- ShellObserver overrides: shell activity → automation events ----
+    // ---- ShellObserver overrides: shell activity -> automation events ----
     void window_opened(WindowId window) override;
     void window_closed(WindowId window) override;
     void tab_added(WindowId window, TabId tab, ContentId content) override;
@@ -193,7 +193,7 @@ struct ShellAutomationBridge::Impl : ShellObserver {
                                           SemanticNode& out) const;
     [[nodiscard]] SemanticSnapshot build_snapshot(WindowId window, std::size_t max_nodes,
                                                   bool& truncated);
-    // Click point inside the visible portion (bounds ∩ clip).
+    // Click point inside the visible portion (bounds intersect clip).
     [[nodiscard]] static Point interactable_point(const SemanticNode& node);
     // Strict-snapshot check for node/stableKey callers: compares the
     // snapshot's pinned revision against the CURRENT merged layout revision

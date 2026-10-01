@@ -3,7 +3,8 @@
 This guide covers building the Windows SDK, changing TabEngine, validating a
 packaged consumer, and integrating the SDK into an application. It describes
 the current local build; it is not a GitHub publication procedure. TabEngine
-is licensed under Apache-2.0 and has no public remote yet.
+is licensed under Apache-2.0. Its public repository is
+https://github.com/AhogeYI/skia-tab-engine; release assets are published there.
 
 ## Scope and build inputs
 

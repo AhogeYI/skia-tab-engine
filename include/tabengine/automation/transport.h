@@ -125,7 +125,8 @@ public:
     void set_route_handler(RouteHandler handler);
     // Mints a logical session (stable connection identity across
     // requests) for host-side use such as legacy input gestures; returns
-    // its id. Thread-safe; idle expiry applies like any session.
+    // its id, or empty when max_sessions is reached. Thread-safe; idle
+    // expiry and the session limit apply like any session.
     [[nodiscard]] std::string create_session();
     // Audit hook for refused authentication: invoked on the worker thread
     // with the failure count and whether the lockout was armed. Never

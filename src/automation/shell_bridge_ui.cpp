@@ -377,8 +377,11 @@ void ShellAutomationBridge::Impl::refresh_provider_revisions(WindowId window) {
     }
     // Detached providers (slot cached but no longer registered) changed the
     // tree too; a successor on a new slot never reuses their identity.
-    std::erase_if(state.provider_revisions,
-                  [&seen_slots](const auto& entry) { return !seen_slots.count(entry.first); });
+    if (std::erase_if(state.provider_revisions,
+                      [&seen_slots](const auto& entry) { return !seen_slots.count(entry.first); }) > 0) {
+        ++state.merged_revision;
+        ++state.merged_layout_revision;
+    }
     state.document_generation = document_generation;
 }
 

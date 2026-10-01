@@ -40,7 +40,7 @@ struct Clock {
 };
 
 struct Responses {
-    // transport_request → {connection, payload}
+    // transport_request -> {connection, payload}
     std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> by_request;
 
     void install(AutomationRuntime& runtime) {
@@ -919,7 +919,7 @@ void test_receive_deadline_cap_expires_queued_request() {
     CHECK(registration.valid());
 
     // No drain while queued; the cap is 0.5s, the descriptor timeout 10s.
-    runtime.receive_with_deadline(7, 3,
+    (void)runtime.receive_with_deadline(7, 3,
                                   R"({"jsonrpc":"2.0","id":"m","method":"app.review.mutate"})",
                                   0.5);
     clock.now_value += 1.0;

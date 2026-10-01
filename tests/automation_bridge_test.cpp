@@ -221,7 +221,7 @@ struct Harness {
     AutomationRuntime runtime{{}, {"1.0", "0.1.0", "bridge-test"}, std::ref(clock)};
     ShellAutomationBridge bridge{{shell, platform, renderer, runtime}};
 
-    // transport_request → payload
+    // transport_request -> payload
     std::map<std::uint64_t, std::string> responses;
 
     Harness() {
@@ -331,7 +331,7 @@ void test_window_and_tab_domains() {
                  R"({"jsonrpc":"2.0","id":8,"method":"Window.close","params":{"windowId":"1"}})");
     CHECK(harness.result(8).find("outcome")->as_string() == "closed");
 
-    // Unknown window → TargetNotFound (1002).
+    // Unknown window -> TargetNotFound (1002).
     harness.call(9,
                  R"({"jsonrpc":"2.0","id":9,"method":"Tab.list","params":{"windowId":"999"}})");
     CHECK(harness.error(9).find("code")->as_integer() == 1002);
@@ -407,7 +407,7 @@ void test_input_sessions_and_keys() {
                  R"({"jsonrpc":"2.0","id":21,"method":"Input.key","params":{"windowId":"1","key":"a","kind":"press"}})");
     CHECK(harness.client.body_events_ >= 1);
 
-    // Unknown key name → InvalidArgument (1016).
+    // Unknown key name -> InvalidArgument (1016).
     harness.call(22,
                  R"({"jsonrpc":"2.0","id":22,"method":"Input.key","params":{"windowId":"1","key":"bogus","kind":"press"}})");
     CHECK(harness.error(22).find("code")->as_integer() == 1016);
@@ -851,12 +851,14 @@ void test_provider_slot_not_reused() {
     BoxProvider first;
     first.key = "first.row";
     first.bounds = {50, 200, 100, 40};
+    std::int64_t before_detach = 0;
     {
         auto registration = harness.runtime.register_semantic_provider(&first);
         CHECK(registration.valid());
         harness.call(310,
                      R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
         const JsonValue snapshot = harness.result(310);
+        before_detach = snapshot.find("layoutRevision")->as_integer();
         for (const JsonValue& node : snapshot.find("nodes")->items()) {
             if (node.find("stableKey") && node.find("stableKey")->as_string() == "first.row") {
                 CHECK(node.find("node")->as_string() ==
@@ -864,6 +866,10 @@ void test_provider_slot_not_reused() {
             }
         }
     }   // first provider unregisters here
+
+    harness.call(314,
+                 R"({"jsonrpc":"2.0","id":1,"method":"UI.snapshot","params":{"windowId":"1"}})");
+    CHECK(harness.result(314).find("layoutRevision")->as_integer() > before_detach);
 
     BoxProvider second;
     second.key = "second.row";

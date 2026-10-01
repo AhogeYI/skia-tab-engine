@@ -161,7 +161,7 @@ bool wire_button(const JsonValue& params, PointerButton& out, CompletionSink& si
     return false;
 }
 
-// Logical key name → Windows virtual-key code. The protocol speaks logical
+// Logical key name -> Windows virtual-key code. The protocol speaks logical
 // names; Windows VK values stay inside the bridge.
 bool logical_key_to_vk(std::string_view name, int& vk) {
     static const std::pair<std::string_view, int> kNamed[] = {

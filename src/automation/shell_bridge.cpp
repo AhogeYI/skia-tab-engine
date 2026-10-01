@@ -1,4 +1,4 @@
-// Shell bridge core: lifecycle, observer → event conversion, environment
+// Shell bridge core: lifecycle, observer -> event conversion, environment
 // hooks, capabilities, and the Window/Tab domains. Input lives in
 // shell_bridge_input.cpp, UI/semantic assembly in shell_bridge_ui.cpp.
 
