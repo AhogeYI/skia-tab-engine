@@ -444,8 +444,7 @@ void test_product_operation_cancel_bridge() {
 
     // Product-registered work owns its cancellation: Operation.cancel
     // consults the bridge, a decline keeps the operation running, and an
-    // accepted cancel settles it without pretending side effects rolled
-    // back.
+    // accepted cancel remains running until its owner confirms completion.
     int asked = 0;
     bool accept = false;
     const std::uint64_t operation = runtime.start_operation(
@@ -477,15 +476,26 @@ void test_product_operation_cancel_bridge() {
     runtime.drain(clock.now_value);
     CHECK(asked == 2);
     const JsonValue cancelled = *responses.parsed(82).find("result");
-    CHECK(cancelled.find("state")->as_string() == "cancelled");
-    CHECK(cancelled.find("cancelled")->as_boolean());
+    CHECK(cancelled.find("state")->as_string() == "running");
+    CHECK(!cancelled.find("cancelled")->as_boolean());
+    CHECK(cancelled.find("cancellationRequested")->as_boolean());
 
     receive(runtime, 83,
             (R"({"jsonrpc":"2.0","id":4,"method":"Operation.get","params":{"operationId":")" +
              automation::id_to_wire(operation) + R"("}})")
                 .c_str());
     runtime.drain(clock.now_value);
-    CHECK(responses.parsed(83).find("result")->find("state")->as_string() == "cancelled");
+    CHECK(responses.parsed(83).find("result")->find("state")->as_string() == "running");
+    receive(runtime, 84,
+            (R"({"jsonrpc":"2.0","id":5,"method":"Operation.wait","params":{"operationId":")" +
+             automation::id_to_wire(operation) + R"("}})").c_str());
+    runtime.drain(clock.now_value);
+    CHECK(!responses.has(84));
+    runtime.finish_operation(operation, automation::OperationState::Cancelled, {},
+        automation::Error::make(automation::ErrorCode::Cancelled, "owner stopped"));
+    clock.now_value += 0.05;
+    runtime.drain(clock.now_value);
+    CHECK(responses.parsed(84).find("result")->find("state")->as_string() == "cancelled");
 }
 
 void test_activity_wait() {

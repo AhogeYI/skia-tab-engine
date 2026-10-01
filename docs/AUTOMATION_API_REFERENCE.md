@@ -146,6 +146,10 @@ path-qualified (`params.windowId: expected string`).
   app_version, sdk_build, instance_id}` (empty id is generated).
 - `OperationState` / `OperationInfo`: running/completed/failed/cancelled
   with method, connection, result/error and timestamps.
+  states. For product-owned work, `Operation.cancel` reports
+  `cancellationRequested` separately from `cancelled`: an accepted request
+  stays running until its owner calls `finish_operation`. Waiters only
+  settle after that terminal report. Terminal records release owner callbacks.
 - `RuntimeEnvironmentHooks`: engine-side wait predicates
   (`animation_active`, `frame_serial`, `node_exists`) filled by the shell
   bridge; absent hooks make the matching conditions `Unsupported`.

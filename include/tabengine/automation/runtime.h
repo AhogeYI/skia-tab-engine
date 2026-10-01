@@ -312,7 +312,8 @@ public:
     // query/wait surface, plus a cooperative cancel bridge consulted by
     // Operation.cancel. The bridge runs on the UI thread and returns
     // whether cancellation was accepted; a decline keeps the operation
-    // Running and the cancel response says so instead of lying.
+    // Running and the cancel response says so instead of lying. Acceptance
+    // requests a stop; the owner must call finish_operation after work stops.
     [[nodiscard]] std::uint64_t start_operation(
         std::string method, std::function<bool()> cooperative_cancel);
     // Finish an operation. `result` is used on success; `error` on failure.

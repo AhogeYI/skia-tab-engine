@@ -1470,6 +1470,8 @@ void AutomationRuntime::finish_operation(std::uint64_t id, OperationState state,
     OperationRecord& record = it->second;
     if (record.info.state != OperationState::Running) return;
     record.info.state = state;
+    // Terminal records must not retain callbacks owned by a product provider.
+    record.cooperative_cancel = {};
     record.info.finished = impl.clock();
     if (state == OperationState::Completed) record.info.result = std::move(result);
     if (state == OperationState::Failed || state == OperationState::Cancelled)
@@ -1893,7 +1895,7 @@ void AutomationRuntime::register_internal_domains() {
             JsonValue::object()));
         methods.push_back(make_descriptor(
             "Operation.cancel",
-            "Cooperative cancel: sets the cancellation flag and marks the operation cancelled.",
+            "Request cooperative cancellation. Product-owned work stays running until its owner finishes it.",
             {observe}, true, false, 10.0,
             schema_object({{"operationId", string_property("Operation id (decimal string)")}},
                           {"operationId"}),
@@ -2007,22 +2009,25 @@ void AutomationRuntime::register_internal_domains() {
             // stopping or not cancellable - reported honestly, never a
             // silent success).
             if (record.cooperative_cancel) {
-                const bool cancelled_now = record.cooperative_cancel();
+                const auto cancel = record.cooperative_cancel;
+                const bool accepted = cancel();
+                OperationInfo current;
+                if (!get_operation(id, current)) {
+                    sink(MethodOutcome::failure(Error::make(
+                        ErrorCode::OperationNotFound, "operation retired during cancellation")));
+                    return;
+                }
                 JsonValue result = JsonValue::object();
                 result.set("operationId", id_to_wire(id));
                 result.set("method", method);
-                result.set("state", cancelled_now ? "cancelled" : "running");
-                result.set("cancelled", cancelled_now);
-                result.set("note", cancelled_now
+                result.set("state", *operation_to_wire(current).find("state"));
+                result.set("cancelled", current.state == OperationState::Cancelled);
+                result.set("cancellationRequested", accepted);
+                result.set("note", accepted
                     ? "the operation owner accepted cancellation; side effects "
                       "already executed are not rolled back"
                     : "the operation owner declined cancellation (already stopping "
                       "or not cancellable)");
-                if (cancelled_now) {
-                    finish_operation(id, OperationState::Cancelled, JsonValue{},
-                                     Error::make(ErrorCode::Cancelled,
-                                                 "cancelled via Operation.cancel"));
-                }
                 sink(MethodOutcome::success(std::move(result)));
                 return;
             }
