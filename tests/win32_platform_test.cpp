@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -159,12 +160,66 @@ int check_uia_root_delegation(tabengine::IPlatform& platform) {
     return 0;
 }
 
+// Hardware media keys arrive as WM_APPCOMMAND; the platform translates the
+// playback subset into standard VK_MEDIA_* key events (with a synthesized
+// release) on the pumped thread.
+int check_media_key_translation(tabengine::IPlatform& platform) {
+    constexpr tabengine::WindowId id = 42;
+    if (!platform.create(id, {40, 50, 360, 240}, "media key test", false)) {
+        return fail("create (media keys)");
+    }
+    HWND hwnd = static_cast<HWND>(platform.native_handle(id));
+    std::vector<tabengine::Event> seen;
+    platform.set_event_handler([&](const tabengine::Event& event) {
+        seen.push_back(event);
+    });
+    struct MediaCommand {
+        int app_command;
+        int vk;
+    };
+    const MediaCommand commands[] = {
+        {APPCOMMAND_MEDIA_PLAY_PAUSE, VK_MEDIA_PLAY_PAUSE},
+        {APPCOMMAND_MEDIA_STOP, VK_MEDIA_STOP},
+        {APPCOMMAND_MEDIA_NEXTTRACK, VK_MEDIA_NEXT_TRACK},
+        {APPCOMMAND_MEDIA_PREVIOUSTRACK, VK_MEDIA_PREV_TRACK},
+    };
+    for (const MediaCommand& command : commands) {
+        seen.clear();
+        SendMessageW(hwnd, WM_APPCOMMAND, reinterpret_cast<WPARAM>(hwnd),
+                     static_cast<LPARAM>(command.app_command << 16));
+        if (seen.size() != 2 || seen[0].type != tabengine::EventType::KeyDown ||
+            seen[0].key != command.vk ||
+            seen[1].type != tabengine::EventType::KeyUp ||
+            seen[1].key != command.vk) {
+            std::printf("FAIL media command %d -> %zu events\n",
+                        command.app_command, seen.size());
+            platform.destroy(id);
+            return 1;
+        }
+    }
+    // A non-playback command keeps its default processing: no key events.
+    seen.clear();
+    SendMessageW(hwnd, WM_APPCOMMAND, reinterpret_cast<WPARAM>(hwnd),
+                 static_cast<LPARAM>(APPCOMMAND_BROWSER_BACKWARD << 16));
+    if (!seen.empty()) {
+        std::printf("FAIL unrelated app command emitted %zu events\n",
+                    seen.size());
+        platform.destroy(id);
+        return 1;
+    }
+    platform.set_event_handler({});
+    platform.destroy(id);
+    std::printf("media key translation passed\n");
+    return 0;
+}
+
 int main() {
     std::unique_ptr<tabengine::IPlatform> platform = tabengine::make_win32_platform();
     if (!platform) return fail("make_win32_platform");
     if (const int result = check_set_client_bounds(*platform)) return result;
     if (const int result = check_hide_show(*platform)) return result;
     if (const int result = check_uia_root_delegation(*platform)) return result;
+    if (const int result = check_media_key_translation(*platform)) return result;
     std::printf("win32 platform bounds test passed\n");
     return 0;
 }

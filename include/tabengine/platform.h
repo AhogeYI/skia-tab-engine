@@ -46,6 +46,10 @@ struct Event {
     Point client{};
     Point screen{};
     Size size{};
+    // KeyDown/KeyUp: the virtual-key code. Hardware media keys
+    // (WM_APPCOMMAND) are translated to their standard VK_MEDIA_* codes
+    // with a synthesized release, so playback keys reach clients as
+    // ordinary key events.
     int key = 0;
     // Keyboard state carried on KeyDown (the pressed key's modifiers) and on
     // pointer presses (Ctrl/Shift-click selection).
