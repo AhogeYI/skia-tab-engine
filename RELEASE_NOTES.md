@@ -1,5 +1,23 @@
 # Release notes
 
+## 0.3.1 (local development)
+
+Protocol version stays `1.0`. The SDK version moves because the platform
+contract grew a documented behavior: hardware media keys are now delivered
+to clients as ordinary key events. Unpublished; packaged locally for the
+Book Reader automation track until the maintainer releases it.
+
+### Media keys
+
+- The Win32 backend translates the `WM_APPCOMMAND` playback subset
+  (play/pause, stop, next track, previous track) to their standard
+  `VK_MEDIA_*` virtual keys and emits `KeyDown` together with a
+  synthesized `KeyUp`, since remote buttons carry no keyboard state. The
+  handled command returns `TRUE` so it is not forwarded again; other app
+  commands keep their default processing.
+- Clients see no new event types: playback keys arrive as regular key
+  events and ride the existing shortcut and body-event dispatch.
+
 ## 0.3.0
 
 Protocol version stays `1.0`. The SDK version moves because the platform

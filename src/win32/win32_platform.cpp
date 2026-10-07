@@ -670,6 +670,38 @@ private:
             self.emit(*native, key);
             return 0;
         }
+        case WM_APPCOMMAND: {
+            // Hardware media keys arrive as app commands, not key events.
+            // The contract translates the playback subset to their standard
+            // virtual keys (with the matching release) so clients handle
+            // them like any other key; other commands keep their default
+            // processing.
+            std::uint64_t vk = 0;
+            switch (GET_APPCOMMAND_LPARAM(lp)) {
+                case APPCOMMAND_MEDIA_PLAY_PAUSE:
+                    vk = VK_MEDIA_PLAY_PAUSE;
+                    break;
+                case APPCOMMAND_MEDIA_STOP:
+                    vk = VK_MEDIA_STOP;
+                    break;
+                case APPCOMMAND_MEDIA_NEXTTRACK:
+                    vk = VK_MEDIA_NEXT_TRACK;
+                    break;
+                case APPCOMMAND_MEDIA_PREVIOUSTRACK:
+                    vk = VK_MEDIA_PREV_TRACK;
+                    break;
+                default:
+                    break;
+            }
+            if (vk == 0) break;
+            Event key;
+            key.type = EventType::KeyDown;
+            key.key = static_cast<int>(vk);
+            self.emit(*native, key);
+            key.type = EventType::KeyUp;
+            self.emit(*native, key);
+            return TRUE;
+        }
         case WM_CHAR: {
             // WM_SYSCHAR is not translated: an Alt+letter mnemonic is a command,
             // not text. Astral characters arrive as two surrogate units. While

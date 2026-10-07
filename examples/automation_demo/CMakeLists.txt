@@ -12,7 +12,16 @@ if(NOT TABENGINE_SDK_ROOT)
     message(FATAL_ERROR "Set TABENGINE_SDK_ROOT to an extracted TabEngine SDK root")
 endif()
 
-find_package(TabEngine 0.3.0 EXACT CONFIG REQUIRED
+# The packaged manifest is the version authority; the example tracks the
+# SDK it ships in instead of pinning a release by hand.
+file(READ "${TABENGINE_SDK_ROOT}/manifest.json" _sdk_manifest)
+string(JSON _sdk_version ERROR_VARIABLE _sdk_version_error
+    GET "${_sdk_manifest}" version)
+if(_sdk_version_error OR NOT _sdk_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "The SDK manifest has no valid package version")
+endif()
+
+find_package(TabEngine ${_sdk_version} EXACT CONFIG REQUIRED
     PATHS "${TABENGINE_SDK_ROOT}" NO_DEFAULT_PATH)
 
 add_executable(tabengine_automation_demo main.cpp)
