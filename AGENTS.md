@@ -22,8 +22,11 @@ repository. Human contributors follow the same rules — see
   cleanup. If `main` looks unfamiliar, run
   `git fetch origin && git log --oneline -3 origin/main` and compare; if it
   still looks wrong, stop and ask — do not "repair" it yourself.
-- Work on a short-lived feature branch for anything non-trivial. Pushes are
-  performed by the maintainer or under explicit per-task authorization only.
+- Maintainer development happens directly on `main` in the primary checkout.
+  Do not create development branches or use additional worktrees for it.
+  External contributions can use feature branches and pull requests.
+- Pushes are performed by the maintainer or under explicit per-task
+  authorization only.
 
 ## Checks before handing off
 
