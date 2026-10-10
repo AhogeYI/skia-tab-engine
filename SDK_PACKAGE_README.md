@@ -16,4 +16,8 @@ separate. `bin/skia.dll` must be deployed beside your application executable.
 TabEngine is released under Apache-2.0: `LICENSE` and `NOTICE` sit at the SDK
 root, and `THIRD_PARTY_NOTICES.md` maps every redistributed third-party
 component (Skia, skcms, FreeType, libpng, zlib, D3D12 Memory Allocator,
-SPIRV-Cross) to its license text under `licenses/`.
+SPIRV-Cross, and nlohmann/json) to its license text under `licenses/`.
+The MCP adapter's dependency notices remain beside their source in
+`tools/mcp/node_modules/`; `tools/mcp/THIRD_PARTY_LICENSES.json` lists their
+versions and license-file paths. Using MCP requires Node.js 20 or newer;
+building a C++ application from this SDK does not require Node.js or npm.

@@ -12,10 +12,10 @@
 #endif
 #if defined(__cpp_exceptions) || defined(_CPPUNWIND)
 #include <exception>
-#define FILDARO_TEST_TERMINATE_HANDLER 1
+#define TABENGINE_TEST_TERMINATE_HANDLER 1
 #endif
 
-#if defined(_WIN32) && !defined(FILDARO_TEST_NO_WINDOWS_HELPERS)
+#if defined(_WIN32) && !defined(TABENGINE_TEST_NO_WINDOWS_HELPERS)
 // Declared here instead of including <windows.h>: this header is pulled in
 // by tests that include <winsock2.h>, and a stray windows.h would drag in
 // winsock 1 first and break them. kernel32 is linked by default.
@@ -41,12 +41,12 @@ struct QuietDialogs {
         _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
         _set_error_mode(_OUT_TO_STDERR);
 #endif
-#if defined(_WIN32) && !defined(FILDARO_TEST_NO_WINDOWS_HELPERS)
+#if defined(_WIN32) && !defined(TABENGINE_TEST_NO_WINDOWS_HELPERS)
         // No WER dialog on crashes; the exit code carries the failure.
         ::SetErrorMode(kSemFailCriticalErrors | kSemNoGpFaultErrorBox |
                        kSemNoOpenFileErrorBox);
 #endif
-#if defined(FILDARO_TEST_TERMINATE_HANDLER)
+#if defined(TABENGINE_TEST_TERMINATE_HANDLER)
         std::set_terminate([] {
             std::fflush(stdout);
             if (std::current_exception()) {

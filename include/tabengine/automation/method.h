@@ -33,7 +33,7 @@ inline constexpr std::string_view kGrantTestHooks = "engine.testHooks";
 [[nodiscard]] bool is_valid_app_domain(std::string_view method);
 
 struct MethodDescriptor {
-    std::string name;            // full wire name, e.g. "Tab.select" or "app.fildaro.navigate"
+    std::string name;            // full wire name, e.g. "Tab.select" or "app.example.navigate"
     std::string summary;         // one-line English summary for tools and docs
     std::vector<std::string> grants;
     bool mutating = false;       // read/write classification surfaced in the schema

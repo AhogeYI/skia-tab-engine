@@ -286,6 +286,73 @@ def source_provenance() -> dict:
     }
 
 
+def require_publication_source(provenance: dict, expected: dict | None = None) -> None:
+    if (provenance.get("source_dirty") is not False or
+            provenance.get("source_branch") != "main" or
+            not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",
+                             str(provenance.get("source_commit", "")))):
+        raise SystemExit("Publication requires an SDK from a clean main commit")
+    if expected is not None and provenance != expected:
+        raise SystemExit("Publication SDK provenance does not match the current clean main commit")
+
+
+def mcp_dependency_licenses(root: Path) -> list[dict]:
+    """Inventory installed lockfile packages, not nested examples or benchmarks."""
+    lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
+    entries = []
+    for relative, locked in sorted(lock["packages"].items()):
+        if not relative.startswith("node_modules/"):
+            continue
+        package = root / relative / "package.json"
+        if not package.is_file():
+            if locked.get("dev") or locked.get("optional"):
+                continue
+            raise SystemExit(f"MCP dependency is missing: {relative}")
+        info = json.loads(package.read_text(encoding="utf-8"))
+        if info.get("version") != locked.get("version"):
+            raise SystemExit(f"MCP dependency version differs from lockfile: {relative}")
+        notices = sorted(p for p in package.parent.iterdir()
+                         if p.is_file() and
+                         re.search(r"license|licence|copying|notice", p.name, re.I))
+        if not notices or any(not p.read_bytes().strip() for p in notices):
+            raise SystemExit(f"MCP dependency license is missing or empty: {relative}")
+        entries.append({"name": info["name"], "version": info["version"],
+                        "license": info.get("license", locked.get("license")),
+                        "license_files": [p.relative_to(root).as_posix() for p in notices]})
+    if not entries:
+        raise SystemExit("MCP dependency license inventory is empty")
+    return entries
+
+
+def validate_sdk_metadata(config: str, stage: Path, manifest: dict,
+                          publication_source: dict | None = None) -> None:
+    if manifest.get("configuration") != config or manifest.get("platform") != "windows-x64":
+        raise SystemExit("SDK configuration or platform does not match the requested verification")
+    relative = "licenses/nlohmann-json/LICENSE.MIT"
+    license_path = stage / relative
+    if relative not in manifest.get("files", {}) or not license_path.is_file():
+        raise SystemExit("SDK nlohmann/json license is missing or not listed in the manifest")
+    if license_path.read_bytes() != (ROOT / "third_party/json/LICENSE.MIT").read_bytes():
+        raise SystemExit("SDK nlohmann/json license text differs from the source license")
+    inventory = stage / "tools/mcp/THIRD_PARTY_LICENSES.json"
+    if ("tools/mcp/THIRD_PARTY_LICENSES.json" not in manifest.get("files", {}) or
+            not inventory.is_file()):
+        raise SystemExit("SDK MCP dependency license inventory is missing")
+    dependencies = mcp_dependency_licenses(inventory.parent)
+    if json.loads(inventory.read_text(encoding="utf-8")) != dependencies:
+        raise SystemExit("SDK MCP dependency license inventory does not match the packaged dependencies")
+    for dependency in dependencies:
+        if any("tools/mcp/" + relative not in manifest["files"]
+               for relative in dependency["license_files"]):
+            raise SystemExit("SDK MCP dependency license is not listed in the manifest")
+    if publication_source is not None:
+        require_publication_source(manifest.get("provenance") or {}, publication_source)
+        version = re.search(r"project\(TabEngine VERSION ([0-9.]+)",
+                            (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")).group(1)
+        if manifest.get("version") != version:
+            raise SystemExit("Publication SDK version does not match the source version")
+
+
 def install_tools(stage: Path) -> dict:
     """Ships the devtools panel and the MCP adapter with the SDK.
 
@@ -318,6 +385,8 @@ def install_tools(stage: Path) -> dict:
     # resolve PATHEXT extensions on its own.
     run(npm, "ci", "--omit=dev", "--no-fund", "--no-audit", cwd=str(mcp_source))
     shutil.copytree(mcp_source / "node_modules", mcp / "node_modules")
+    (mcp / "THIRD_PARTY_LICENSES.json").write_text(
+        json.dumps(mcp_dependency_licenses(mcp), indent=2) + "\n", encoding="utf-8")
     return {
         "devtools": {
             "entry": "tools/devtools/panel.html",
@@ -334,7 +403,11 @@ def install_tools(stage: Path) -> dict:
 
 
 def package_sdk(config: str, skia_root: Path | None = None,
-                stage_root: Path | None = None, out_dir: Path | None = None) -> Path:
+                stage_root: Path | None = None, out_dir: Path | None = None,
+                publication: bool = False) -> Path:
+    publication_source = source_provenance() if publication else None
+    if publication:
+        require_publication_source(publication_source)
     skia_root = (skia_root or shared_package(config)).resolve()
     if not (skia_root / "bin" / "skia.dll").is_file():
         raise SystemExit(f"Shared Skia is missing: run build-skia --config {config}")
@@ -380,6 +453,7 @@ def package_sdk(config: str, skia_root: Path | None = None,
         "tools": tools_section,
         "files": {p.relative_to(stage).as_posix(): hash_file(p) for p in files},
     }
+    validate_sdk_metadata(config, stage, manifest, publication_source)
     (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     archive = out_dir / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
@@ -411,7 +485,10 @@ def package_sdk(config: str, skia_root: Path | None = None,
     return stage
 
 
-def verify(config: str, archive_path: Path | None = None) -> None:
+def verify(config: str, archive_path: Path | None = None, publication: bool = False) -> None:
+    publication_source = source_provenance() if publication else None
+    if publication:
+        require_publication_source(publication_source)
     version_match = re.search(r"project\(TabEngine VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(encoding="utf-8"))
     version = version_match.group(1) if version_match else "unknown"
     archive = archive_path or ROOT / "dist" / f"tabengine-sdk-{version}-windows-x64-{config.lower()}.zip"
@@ -424,7 +501,7 @@ def verify(config: str, archive_path: Path | None = None) -> None:
         with zipfile.ZipFile(archive) as bundle:
             bundle.extractall(temp)
         stage = Path(temp) / archive.stem
-        verify_extracted_sdk(config, stage, Path(temp) / "consumer-build")
+        verify_extracted_sdk(config, stage, Path(temp) / "consumer-build", publication_source)
         symbols_zip = archive.with_name(archive.stem + "-symbols.zip")
         if symbols_zip.is_file():
             with zipfile.ZipFile(symbols_zip) as bundle:
@@ -439,11 +516,13 @@ def verify(config: str, archive_path: Path | None = None) -> None:
             print("SDK symbols passed")
 
 
-def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
+def verify_extracted_sdk(config: str, stage: Path, build: Path,
+                         publication_source: dict | None = None) -> None:
     manifest_path = stage / "manifest.json"
     if not manifest_path.is_file():
         raise SystemExit(f"SDK manifest is missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    validate_sdk_metadata(config, stage, manifest, publication_source)
     for relative, expected in manifest["files"].items():
         path = stage / relative
         if not path.is_file() or hash_file(path) != expected:
@@ -515,7 +594,7 @@ def verify_extracted_sdk(config: str, stage: Path, build: Path) -> None:
 def verify_packaged_tools(stage: Path, demo: Path, env: dict[str, str]) -> None:
     """Tool-level checks against the extracted package only.
 
-    - The panel logic regression runs from the package (node, no deps).
+    - Panel logic/DOM and MCP protocol regressions run from the package.
     - The MCP adapter loads its vendored dependencies from a directory with
       spaces in its name (Windows shim/path robustness) and refuses to start
       without connection settings instead of crashing.
@@ -526,6 +605,7 @@ def verify_packaged_tools(stage: Path, demo: Path, env: dict[str, str]) -> None:
         raise SystemExit("node is required to verify the packaged tools")
     run(node, str(stage / "tools" / "devtools" / "panel_test.mjs"))
     run(node, str(stage / "tools" / "devtools" / "panel_dom_test.mjs"))
+    run(node, str(stage / "tools" / "mcp" / "regression_test.mjs"))
     print("SDK packaged devtools panel logic passed")
 
     spaced = stage.parent / "mcp tool dir"
@@ -585,19 +665,29 @@ def main() -> None:
                         help="Directory for the ZIP archives (default dist/)")
     parser.add_argument("--archive", type=Path,
                         help="Explicit ZIP for verify (default dist/<name>.zip)")
+    parser.add_argument("--publication", action="store_true",
+                        help="Require the SDK to match the current clean main commit")
     args = parser.parse_args()
+    if args.publication:
+        if args.action not in ("package", "verify", "release"):
+            parser.error("--publication applies to package, verify, or release")
+        require_publication_source(source_provenance())
     if args.action == "fetch":
         fetch()
     elif args.action == "build-skia":
         build_skia(args.config)
     elif args.action == "package":
-        package_sdk(args.config, args.skia_root, args.stage_root, args.out_dir)
+        package_sdk(args.config, args.skia_root, args.stage_root, args.out_dir, args.publication)
     elif args.action == "verify":
-        verify(args.config, args.archive)
+        verify(args.config, args.archive, args.publication)
     else:
         build_skia(args.config)
-        package_sdk(args.config, stage_root=args.stage_root, out_dir=args.out_dir)
-        verify(args.config, args.archive)
+        stage = package_sdk(args.config, stage_root=args.stage_root, out_dir=args.out_dir,
+                            publication=args.publication)
+        version = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))["version"]
+        archive = args.archive or (args.out_dir or ROOT / "dist") / (
+            f"tabengine-sdk-{version}-windows-x64-{args.config.lower()}.zip")
+        verify(args.config, archive, args.publication)
 
 
 if __name__ == "__main__":

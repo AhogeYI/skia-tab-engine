@@ -38,8 +38,10 @@ tabengine-sdk-<version>-windows-x64-<config>/
 Obtain the package and its expected ZIP SHA-256 from your distributor, then
 verify the archive before extraction. The SDK manifest checks the contents of
 an extracted archive, but it is not a substitute for a trusted expected ZIP
-hash. TabEngine currently has no public release location; local SDK archives
-are made by its maintainers.
+hash. Published archives and expected hashes are available on
+[GitHub Releases](https://github.com/AhogeYI/skia-tab-engine/releases).
+The repository may describe an unpublished development version; use the
+guide packaged with your selected release and check its manifest.
 
 ## Run the included application
 

@@ -195,6 +195,7 @@ if(WIN32 AND TABENGINE_BUILD_SKIA)
         install(DIRECTORY include/ DESTINATION include)
         install(FILES SDK_PACKAGE_README.md DESTINATION . RENAME README.md)
         install(FILES RELEASE_NOTES.md DESTINATION .)
+        install(FILES third_party/json/LICENSE.MIT DESTINATION licenses/nlohmann-json)
         install(FILES docs/SDK_USER_GUIDE.md docs/API_REFERENCE.md
             docs/AUTOMATION_GUIDE.md docs/AUTOMATION_API_REFERENCE.md DESTINATION docs)
         install(DIRECTORY examples/sdk_hello_tabs/ DESTINATION examples/sdk_hello_tabs)

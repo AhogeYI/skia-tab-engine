@@ -19,7 +19,10 @@ ABI across arbitrary compiler or SDK updates; rebuild consumers after an SDK
 update.
 
 Install Visual Studio with the C++ and Windows SDK components, CMake, Ninja,
-Git, and Python. The first Skia build needs network access. The script locates
+Git, Python, and Node.js 20 or newer with npm. Packaging runs `npm ci` to
+bundle the MCP dependencies; verification uses Node.js for the packaged tools.
+Pure C++ SDK consumers do not need Node.js or npm. The first Skia build and
+uncached npm dependency installation need network access. The script locates
 MSBuild and `lib.exe` through `PATH` or `vswhere`. Run all commands below from
 the TabEngine repository root in PowerShell.
 
@@ -158,7 +161,9 @@ cmake_minimum_required(VERSION 3.24)
 project(MyTabbedApp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(TABENGINE_SDK_ROOT "" CACHE PATH "Extracted TabEngine SDK root")
-find_package(TabEngine 0.3.0 EXACT CONFIG REQUIRED
+file(READ "${TABENGINE_SDK_ROOT}/manifest.json" _sdk_manifest)
+string(JSON _sdk_version GET "${_sdk_manifest}" version)
+find_package(TabEngine ${_sdk_version} EXACT CONFIG REQUIRED
     PATHS "${TABENGINE_SDK_ROOT}" NO_DEFAULT_PATH)
 add_executable(my_tabbed_app main.cpp)
 target_link_libraries(my_tabbed_app PRIVATE TabEngine::SDK)
@@ -203,6 +208,33 @@ consumer when switching roots; do not reuse a CMake cache that points to an
 older SDK. An application can use `build/sdk-stage/<config>` directly for local
 development or the extracted ZIP for a clean consumer check. Both paths use
 the same CMake package.
+
+### Preparing a publication candidate
+
+Local `package` and `release` commands allow an uncommitted development tree.
+For public SDK assets, first commit the reviewed changes on `main` with a DCO
+signature. Then run the explicit publication gate for both configurations:
+
+```powershell
+python tests/sdk_packaging_test.py
+python tools/sdk.py package --config Debug --publication
+python tools/sdk.py verify --config Debug --publication
+python tools/sdk.py package --config Release --publication
+python tools/sdk.py verify --config Release --publication
+```
+
+This reuses prepared Skia inputs. `--publication` refuses dirty trees,
+non-main branches, and packages from another commit or SDK version.
+Every package/verify also checks the configuration, JSON license text,
+and installed MCP dependency license inventory. Tool verification includes
+panel logic/DOM, MCP regressions, and a live MCP handshake against the packaged
+demo. Record each final ZIP SHA-256; only the maintainer uploads assets or
+pushes commits. Do not edit a manifest to change its provenance.
+
+The core and tool tests run in public CI. The Windows SDK job remains disabled
+until a runner with Visual Studio 18 2026 is verified. Before publication,
+maintainers must run the affected Windows tests and the two local publication
+gates above; a green core CI alone does not cover the Windows SDK.
 
 ## Troubleshooting
 

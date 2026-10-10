@@ -65,9 +65,9 @@ content, input routing, and styling.
 Core library and tests build with no Skia package at all:
 
 ```powershell
-cmake -S . -B build/core -G "Visual Studio 18 2026" -A x64
-cmake --build build/core --config Debug --target tabengine_core_test
-ctest --test-dir build/core -C Debug --output-on-failure
+cmake --preset core
+cmake --build --preset core
+ctest --preset core
 ```
 
 The Windows shell, renderer, workbench demo, and their tests additionally need
@@ -79,7 +79,7 @@ python tools/sdk.py build-skia --config Debug
 cmake -S . -B build/windows -G "Visual Studio 18 2026" -A x64 `
   -DTABENGINE_BUILD_WIN32_DEMO=ON `
   -DTABENGINE_SKIA_ROOT="${PWD}/build/skia-shared/Debug"
-cmake --build build/windows --config Debug --target tabengine_win32_demo
+cmake --build build/windows --config Debug
 ctest --test-dir build/windows -C Debug --output-on-failure
 ```
 
@@ -106,8 +106,11 @@ A consumer only declares `find_package(TabEngine CONFIG REQUIRED)`, links
 `TabEngine::SDK`, and deploys `bin/skia.dll` beside its executable. Debug and
 Release packages are separate; see the
 [SDK user guide](docs/SDK_USER_GUIDE.md) and the packaged
-`examples/sdk_hello_tabs` application. Release archives are currently built
-locally by the maintainers; a public download channel does not exist yet.
+`examples/sdk_hello_tabs` application. Published SDK archives and their
+SHA-256 hashes are available on
+[GitHub Releases](https://github.com/AhogeYI/skia-tab-engine/releases).
+Local development versions in this checkout may be newer than the latest
+published SDK; check the manifest and release tag when choosing a package.
 
 ## A minimal application
 

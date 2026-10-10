@@ -4,8 +4,17 @@
 
 Protocol version stays `1.0`. The SDK version moves because the platform
 contract grew a documented behavior: hardware media keys are now delivered
-to clients as ordinary key events. Unpublished; packaged locally for the
-Book Reader automation track until the maintainer releases it.
+to clients as ordinary key events. This version is unpublished until the
+maintainer publishes its release assets.
+
+### Distribution checks
+
+- SDK packages include the nlohmann/json MIT license and an inventory of
+  bundled MCP dependency notices. Verification rejects incomplete notices.
+- `tools/sdk.py --publication` requires a package from the current clean
+  `main` commit; ordinary local development packages remain supported.
+- Packaged-tool verification includes MCP regressions as well as the live
+  demo handshake and panel logic/DOM tests.
 
 ### Media keys
 

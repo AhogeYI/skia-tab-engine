@@ -47,14 +47,53 @@ jobs:
   windows-sdk:
     name: windows sdk (runner toolchain unverified)
     if: false
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Build pinned Skia (shared DLL)
-        run: python tools/sdk.py build-skia --config Debug
+        run: python tools/sdk.py build-skia --config ${{ matrix.configuration }}
+
+      - name: Build and test Windows contracts
+        shell: pwsh
+        run: |
+          $config = '${{ matrix.configuration }}'
+          cmake -S . -B "build/sdk-tests/$config" -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON -DTABENGINE_BUILD_SKIA=ON "-DTABENGINE_SKIA_ROOT=$PWD/build/skia-shared/$config"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "build/sdk-tests/$config" --config $config
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "build/sdk-tests/$config" -C $config --output-on-failure --timeout 120
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package and verify the SDK
         run: |
-          python tools/sdk.py package --config Debug
-          python tools/sdk.py verify --config Debug
+          python tools/sdk.py package --config ${{ matrix.configuration }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/sdk.py verify --config ${{ matrix.configuration }}
+
+  tools:
+    name: SDK distribution and control tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Test SDK distribution guards
+        run: python3 tests/sdk_packaging_test.py
+      - name: Install locked MCP dependencies
+        working-directory: tools/mcp
+        run: npm ci --omit=dev --no-fund --no-audit
+      - name: Test panel and MCP contracts
+        run: |
+          node tools/devtools/panel_test.mjs
+          node tools/devtools/panel_dom_test.mjs
+          node tools/mcp/regression_test.mjs

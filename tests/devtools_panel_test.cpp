@@ -91,9 +91,12 @@ std::filesystem::path make_resources() {
         std::ofstream file(dir / name, std::ios::binary);
         file << bytes;
     };
-    write("panel.html", "<!doctype html><title>panel</title><p>shell</p>");
+    write("panel.html", "<!doctype html><title>panel</title><p>shell</p>"
+                        "<script type='module' src='{{MOUNT}}/assets/panel.js'></script>");
     write("panel.css", "body{color:#eee}");
-    write("panel.js", "export const panel = true;");
+    write("panel.js", "import { core } from '{{MOUNT}}/assets/panel_core.js';"
+                      "export const panel = true;");
+    write("panel_core.js", "export const core = true;");
     write("logo.svg", "<svg xmlns='http://www.w3.org/2000/svg'/>");
     write("secret.txt", "not served");
     return dir;
@@ -267,6 +270,13 @@ int main() {
         // resolve outside the assets route).
         CHECK(page.body.find("/panel/custom/assets/panel.js") != std::string::npos);
         CHECK(script.body.find("/panel/custom/assets/panel_core.js") != std::string::npos);
+        CHECK(page.body.find("{{MOUNT}}") == std::string::npos);
+        CHECK(script.body.find("{{MOUNT}}") == std::string::npos);
+        const RawResponse core = round_trip([&] {
+            return http_raw(custom.port(),
+                            get_request("/panel/custom/assets/panel_core.js", false, token));
+        });
+        CHECK(core.status == 200 && core.body.find("core = true") != std::string::npos);
         const RawResponse wrong_assets = round_trip([&] {
             return http_raw(custom.port(),
                             get_request("/automation/v1/panel/assets/panel.js", false, token));
