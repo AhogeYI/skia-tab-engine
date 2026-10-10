@@ -332,7 +332,10 @@ def validate_sdk_metadata(config: str, stage: Path, manifest: dict,
     license_path = stage / relative
     if relative not in manifest.get("files", {}) or not license_path.is_file():
         raise SystemExit("SDK nlohmann/json license is missing or not listed in the manifest")
-    if license_path.read_bytes() != (ROOT / "third_party/json/LICENSE.MIT").read_bytes():
+    # Git checkouts can use LF or CRLF; compare the full text while the
+    # manifest independently checks the exact bytes shipped in the archive.
+    if license_path.read_text(encoding="utf-8") != (
+            ROOT / "third_party/json/LICENSE.MIT").read_text(encoding="utf-8"):
         raise SystemExit("SDK nlohmann/json license text differs from the source license")
     inventory = stage / "tools/mcp/THIRD_PARTY_LICENSES.json"
     if ("tools/mcp/THIRD_PARTY_LICENSES.json" not in manifest.get("files", {}) or

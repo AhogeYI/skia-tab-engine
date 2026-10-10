@@ -49,6 +49,12 @@ class DistributionGuards(unittest.TestCase):
     def test_complete_distribution_is_accepted(self):
         self.validate()
 
+    def test_license_check_is_portable_across_git_line_endings(self):
+        text = self.license.read_text(encoding="utf-8")
+        for newline in ("\n", "\r\n"):
+            self.license.write_bytes(text.replace("\n", newline).encode("utf-8"))
+            self.validate()
+
     def test_missing_truncated_or_unmanifested_json_license_is_rejected(self):
         original = self.license.read_bytes()
         self.license.unlink()
