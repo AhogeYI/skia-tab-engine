@@ -750,15 +750,15 @@ private:
         case WM_IME_COMPOSITION: {
             HIMC context = ImmGetContext(hwnd);
             if (!context) break;
-            Event update;
-            if (lp & GCS_RESULTSTR) {
-                update.type = EventType::ImeCommit;
-            } else if (lp & GCS_COMPSTR) {
-                update.type = EventType::ImeUpdate;
-            }
-            if (update.type == EventType::ImeCommit || update.type == EventType::ImeUpdate) {
-                const DWORD kind = update.type == EventType::ImeCommit ? GCS_RESULTSTR
-                                                                       : GCS_COMPSTR;
+            // Decide on the raw lParam first: a composition message with
+            // neither bit set (lParam == 0) carries nothing and must emit
+            // nothing - never read an Event whose type was not set.
+            const DWORD kind = (lp & GCS_RESULTSTR) ? GCS_RESULTSTR
+                               : (lp & GCS_COMPSTR) ? GCS_COMPSTR : 0;
+            if (kind != 0) {
+                Event update;
+                update.type = kind == GCS_RESULTSTR ? EventType::ImeCommit
+                                                    : EventType::ImeUpdate;
                 if (read_ime_string(context, kind, &update.ime_text)) {
                     if (update.type == EventType::ImeCommit) {
                         native->ime_committed = true;
